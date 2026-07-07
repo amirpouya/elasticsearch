@@ -1,0 +1,266 @@
+/*
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
+ */
+
+package org.elasticsearch.xpack.esql.planner;
+
+import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.index.Term;
+import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.BoostQuery;
+import org.apache.lucene.search.FuzzyQuery;
+import org.apache.lucene.search.MatchAllDocsQuery;
+import org.apache.lucene.search.MatchNoDocsQuery;
+import org.apache.lucene.search.Query;
+import org.elasticsearch.common.lucene.BytesRefs;
+import org.elasticsearch.common.lucene.search.Queries;
+import org.elasticsearch.common.unit.Fuzziness;
+import org.elasticsearch.compute.operator.HighlightQueryParser;
+import org.elasticsearch.core.Nullable;
+import org.elasticsearch.xpack.esql.core.expression.Expression;
+import org.elasticsearch.xpack.esql.core.expression.Expressions;
+import org.elasticsearch.xpack.esql.core.expression.FoldContext;
+import org.elasticsearch.xpack.esql.core.expression.Literal;
+import org.elasticsearch.xpack.esql.core.expression.MapExpression;
+import org.elasticsearch.xpack.esql.core.expression.NamedExpression;
+import org.elasticsearch.xpack.esql.core.type.DataType;
+import org.elasticsearch.xpack.esql.expression.function.fulltext.Kql;
+import org.elasticsearch.xpack.esql.expression.function.fulltext.Match;
+import org.elasticsearch.xpack.esql.expression.function.fulltext.MatchPhrase;
+import org.elasticsearch.xpack.esql.expression.function.fulltext.QueryString;
+import org.elasticsearch.xpack.esql.expression.predicate.logical.And;
+import org.elasticsearch.xpack.esql.expression.predicate.logical.Not;
+import org.elasticsearch.xpack.esql.expression.predicate.logical.Or;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Translates a {@code HIGHLIGHT} query {@link Expression} into one Lucene {@link Query} over the real {@code ON} field names.
+ * <p>
+ * Verification and execution both call this translator so they accept/reject the same query shapes and options.
+ * <p>
+ * Translation walks the expression tree directly (not {@code asQuery()}) to stay independent from pre-mapping state.
+ */
+public final class HighlightQueryTranslator {
+
+    // Option names mirrored from MATCH/MATCH_PHRASE/QSTR.
+    private static final String BOOST_OPTION = "boost";
+    private static final String OPERATOR_OPTION = "operator";
+    private static final String FUZZINESS_OPTION = "fuzziness";
+    private static final String PREFIX_LENGTH_OPTION = "prefix_length";
+    private static final String MAX_EXPANSIONS_OPTION = "max_expansions";
+    private static final String FUZZY_TRANSPOSITIONS_OPTION = "fuzzy_transpositions";
+    private static final String MINIMUM_SHOULD_MATCH_OPTION = "minimum_should_match";
+    private static final String SLOP_OPTION = "slop";
+    private static final String DEFAULT_FIELD_OPTION = "default_field";
+    private static final Set<String> QUERY_STRING_ALLOWED_OPTIONS = Set.of(DEFAULT_FIELD_OPTION);
+    private static final FoldContext FOLD_CONTEXT = FoldContext.small();
+
+    // MATCH options with no meaning in coordinator-side highlighting: reject instead of silently ignoring.
+    private static final Set<String> MATCH_REJECTED_OPTIONS = Set.of(
+        "fuzzy_rewrite",
+        "zero_terms_query",
+        "auto_generate_synonyms_phrase_query",
+        "lenient"
+    );
+    private static final Set<String> MATCH_PHRASE_REJECTED_OPTIONS = Set.of("zero_terms_query");
+
+    private final List<String> fields;
+    private final Analyzer defaultAnalyzer;
+
+    private HighlightQueryTranslator(List<String> fields, Analyzer defaultAnalyzer) {
+        this.fields = fields;
+        this.defaultAnalyzer = defaultAnalyzer;
+    }
+
+    /**
+     * Translates {@code query} into a single Lucene {@link Query} over the given {@code fields}.
+     *
+     * @param query            the resolved HIGHLIGHT query expression (a full-text function, a boolean combination of
+     *                         them, or a string {@link Literal})
+     * @param fields           the real {@code ON} field names, in order
+     * @param defaultAnalyzer  the analyzer used to tokenize the query text (always the default Standard analyzer)
+     * @throws IllegalArgumentException when the expression, a function, or an option is not supported by HIGHLIGHT
+     */
+    public static Query translate(Expression query, List<String> fields, Analyzer defaultAnalyzer) {
+        return new HighlightQueryTranslator(fields, defaultAnalyzer).doTranslate(query);
+    }
+
+    private Query doTranslate(Expression expr) {
+        // MatchOperator (':') extends Match, so Match handles both.
+        if (expr instanceof Match match) {
+            return translateMatch(match);
+        }
+        if (expr instanceof MatchPhrase matchPhrase) {
+            return translateMatchPhrase(matchPhrase);
+        }
+        if (expr instanceof QueryString queryString) {
+            return translateQueryString(queryString);
+        }
+        if (expr instanceof And and) {
+            return translateBoolean(and.left(), and.right(), BooleanClause.Occur.MUST);
+        }
+        if (expr instanceof Or or) {
+            return translateBoolean(or.left(), or.right(), BooleanClause.Occur.SHOULD);
+        }
+        if (expr instanceof Not not) {
+            return new BooleanQuery.Builder().add(new MatchAllDocsQuery(), BooleanClause.Occur.MUST)
+                .add(doTranslate(not.field()), BooleanClause.Occur.MUST_NOT)
+                .build();
+        }
+        if (expr instanceof Kql) {
+            throw new IllegalArgumentException("HIGHLIGHT does not support [KQL] queries yet");
+        }
+        if (expr instanceof Literal literal && DataType.isString(literal.dataType())) {
+            // String literal behaves like query_string over all ON fields.
+            return HighlightQueryParser.parse(fields, BytesRefs.toString(literal.value()), defaultAnalyzer);
+        }
+        throw new IllegalArgumentException(
+            "HIGHLIGHT query must be a full-text function (MATCH, MATCH_PHRASE, QSTR) or a boolean combination of them, found ["
+                + expr.sourceText()
+                + "]"
+        );
+    }
+
+    private Query translateBoolean(Expression left, Expression right, BooleanClause.Occur occur) {
+        return new BooleanQuery.Builder().add(doTranslate(left), occur).add(doTranslate(right), occur).build();
+    }
+
+    private Query translateMatch(Match match) {
+        Map<String, Expression> options = optionMap(match.options());
+        rejectOptions(options, MATCH_REJECTED_OPTIONS, "MATCH");
+        String field = fieldName(match.field());
+        String text = queryText(match.query());
+        Query query = createMatchQueryBuilder(options, defaultAnalyzer).createBooleanQuery(field, text, matchOperator(options));
+        query = matchNoTermsAsNoDocs(query, "HIGHLIGHT MATCH produced no terms");
+        query = Queries.maybeApplyMinimumShouldMatch(query, stringOption(options, MINIMUM_SHOULD_MATCH_OPTION));
+        return applyBoost(query, options);
+    }
+
+    private Query translateMatchPhrase(MatchPhrase matchPhrase) {
+        Map<String, Expression> options = optionMap(matchPhrase.options());
+        rejectOptions(options, MATCH_PHRASE_REJECTED_OPTIONS, "MATCH_PHRASE");
+        String field = fieldName(matchPhrase.field());
+        String text = queryText(matchPhrase.query());
+        int slop = intOption(options, SLOP_OPTION, 0);
+
+        Query query = new org.apache.lucene.util.QueryBuilder(defaultAnalyzer).createPhraseQuery(field, text, slop);
+        query = matchNoTermsAsNoDocs(query, "HIGHLIGHT MATCH_PHRASE produced no terms");
+        return applyBoost(query, options);
+    }
+
+    private Query translateQueryString(QueryString queryString) {
+        Map<String, Expression> options = optionMap(queryString.options());
+        rejectUnsupportedOptions(options, QUERY_STRING_ALLOWED_OPTIONS, "QSTR");
+        String text = queryText(queryString.query());
+        String defaultField = stringOption(options, DEFAULT_FIELD_OPTION);
+        List<String> targetFields = defaultField != null ? List.of(defaultField) : fields;
+        return HighlightQueryParser.parse(targetFields, text, defaultAnalyzer);
+    }
+
+    private static Query applyBoost(Query query, Map<String, Expression> options) {
+        Float boost = floatOption(options, BOOST_OPTION);
+        return boost == null ? query : new BoostQuery(query, boost);
+    }
+
+    private static void rejectOptions(Map<String, Expression> options, Set<String> rejected, String functionName) {
+        for (String name : rejected) {
+            if (options.containsKey(name)) {
+                throw new IllegalArgumentException("HIGHLIGHT does not support the [" + name + "] option of [" + functionName + "]");
+            }
+        }
+    }
+
+    private static void rejectUnsupportedOptions(Map<String, Expression> options, Set<String> supported, String functionName) {
+        for (String name : options.keySet()) {
+            if (supported.contains(name) == false) {
+                throw new IllegalArgumentException("HIGHLIGHT does not support the [" + name + "] option of [" + functionName + "]");
+            }
+        }
+    }
+
+    private static Map<String, Expression> optionMap(Expression options) {
+        return options instanceof MapExpression mapExpression ? mapExpression.keyFoldedMap() : Map.of();
+    }
+
+    /** Returns the field key used by both translator and operator for a given ON expression. */
+    private static String fieldName(Expression field) {
+        return field instanceof NamedExpression named ? named.name() : Expressions.name(field);
+    }
+
+    private static String queryText(Expression query) {
+        return BytesRefs.toString(query.fold(FOLD_CONTEXT));
+    }
+
+    @Nullable
+    private static String stringOption(Map<String, Expression> options, String name) {
+        Expression value = options.get(name);
+        return value == null ? null : BytesRefs.toString(value.fold(FOLD_CONTEXT));
+    }
+
+    @Nullable
+    private static Float floatOption(Map<String, Expression> options, String name) {
+        Expression value = options.get(name);
+        return value == null ? null : ((Number) value.fold(FOLD_CONTEXT)).floatValue();
+    }
+
+    private static int intOption(Map<String, Expression> options, String name, int defaultValue) {
+        Expression value = options.get(name);
+        return value == null ? defaultValue : ((Number) value.fold(FOLD_CONTEXT)).intValue();
+    }
+
+    private static boolean boolOption(Map<String, Expression> options, String name, boolean defaultValue) {
+        Expression value = options.get(name);
+        return value == null ? defaultValue : (Boolean) value.fold(FOLD_CONTEXT);
+    }
+
+    private static Query matchNoTermsAsNoDocs(@Nullable Query query, String reason) {
+        return query == null ? new MatchNoDocsQuery(reason) : query;
+    }
+
+    private static BooleanClause.Occur matchOperator(Map<String, Expression> options) {
+        String operator = stringOption(options, OPERATOR_OPTION);
+        return "AND".equalsIgnoreCase(operator) ? BooleanClause.Occur.MUST : BooleanClause.Occur.SHOULD;
+    }
+
+    private static org.apache.lucene.util.QueryBuilder createMatchQueryBuilder(Map<String, Expression> options, Analyzer analyzer) {
+        String fuzzinessValue = stringOption(options, FUZZINESS_OPTION);
+        if (fuzzinessValue == null) {
+            return new org.apache.lucene.util.QueryBuilder(analyzer);
+        }
+        return new FuzzyQueryBuilder(
+            analyzer,
+            Fuzziness.fromString(fuzzinessValue),
+            intOption(options, PREFIX_LENGTH_OPTION, FuzzyQuery.defaultPrefixLength),
+            intOption(options, MAX_EXPANSIONS_OPTION, FuzzyQuery.defaultMaxExpansions),
+            boolOption(options, FUZZY_TRANSPOSITIONS_OPTION, FuzzyQuery.defaultTranspositions)
+        );
+    }
+
+    /** QueryBuilder variant that emits Lucene {@link FuzzyQuery} without requiring a search execution context. */
+    private static final class FuzzyQueryBuilder extends org.apache.lucene.util.QueryBuilder {
+        private final Fuzziness fuzziness;
+        private final int prefixLength;
+        private final int maxExpansions;
+        private final boolean transpositions;
+
+        FuzzyQueryBuilder(Analyzer analyzer, Fuzziness fuzziness, int prefixLength, int maxExpansions, boolean transpositions) {
+            super(analyzer);
+            this.fuzziness = fuzziness;
+            this.prefixLength = prefixLength;
+            this.maxExpansions = maxExpansions;
+            this.transpositions = transpositions;
+        }
+
+        @Override
+        protected Query newTermQuery(Term term, float boost) {
+            return new FuzzyQuery(term, fuzziness.asDistance(term.text()), prefixLength, maxExpansions, transpositions);
+        }
+    }
+}

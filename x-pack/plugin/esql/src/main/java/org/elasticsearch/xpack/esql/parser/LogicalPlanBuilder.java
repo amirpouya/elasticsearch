@@ -1456,9 +1456,12 @@ public class LogicalPlanBuilder extends ExpressionBuilder {
         Source source = source(ctx);
         // `prefix = "..."` renames generated highlight columns; default is "highlight_".
         final String prefix = highlightPrefix(ctx);
+        // The query is a full booleanExpression: a string literal (parsed as query_string over the ON fields) or a
+        // full-text function expression (MATCH/MATCH_PHRASE/QSTR/':'/boolean combinations). The literal-vs-expression
+        // split happens later, in verification and local planning.
         // TODO: support the bare form by deriving the query from a preceding full-text WHERE, stopping at row-shaping
         // commands such as STATS, INLINESTATS, and LOOKUP JOIN.
-        Expression query = ctx.queryText == null ? null : visitString(ctx.queryText);
+        Expression query = ctx.queryExpression == null ? null : expression(ctx.queryExpression);
         // TODO: support `HIGHLIGHT ON *` and deriving ON fields from the resolved query. Today fields must be listed.
         List<NamedExpression> fields = ctx.highlightFields.qualifiedName()
             .stream()

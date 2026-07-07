@@ -7,6 +7,10 @@
 
 package org.elasticsearch.compute.operator;
 
+import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.en.EnglishAnalyzer;
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.search.Query;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.compute.data.Block;
 import org.elasticsearch.compute.data.BlockFactory;
@@ -35,6 +39,11 @@ public class HighlightOperatorTests extends OperatorTestCase {
     private static final String DEFAULT_POST_TAG = "</em>";
     private static final String DEFAULT_ENCODER = "default";
 
+    // The single ON field indexed by the single-field test helpers. Its real name is what the parsed query targets, so
+    // an unqualified term (e.g. "fox") highlights it while a term qualified on any other field never matches it.
+    private static final List<String> CONTENT = List.of("content");
+    private static final List<String> TITLE_BODY = List.of("title", "body");
+
     @Override
     protected SourceOperator simpleInput(BlockFactory blockFactory, int size) {
         List<BytesRef> input = IntStream.range(0, size).mapToObj(i -> new BytesRef("the fox number " + i)).toList();
@@ -43,7 +52,10 @@ public class HighlightOperatorTests extends OperatorTestCase {
 
     @Override
     protected Operator.OperatorFactory simple(SimpleOptions options) {
-        return new HighlightOperator.Factory(config("fox", 5, 0, 0), List.of(dc -> identityEvaluator()));
+        Analyzer analyzer = new StandardAnalyzer();
+        HighlightConfig config = config("fox", 5, 0, 0);
+        Query query = HighlightQueryParser.parse(CONTENT, config.queryText(), analyzer);
+        return new HighlightOperator.Factory(config, analyzer, query, CONTENT, List.of(dc -> identityEvaluator()));
     }
 
     @Override
@@ -96,7 +108,8 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testEmptyQueryHasNoTermsAndDoesNotMatch() {
-        // An empty query analyzes to no terms; the operator turns that into a MatchNoDocsQuery, so nothing is highlighted.
+        // Lucene's query parser throws on blank input, so HighlightQueryParser short-circuits it to a MatchNoDocsQuery;
+        // with the default no_match_size = 0 the row yields null.
         BytesRefBlock result = highlightSingle(config("", 5, 0, 0), "any text here");
         try {
             assertThat(result.isNull(0), equalTo(true));
@@ -119,15 +132,19 @@ public class HighlightOperatorTests extends OperatorTestCase {
         }
     }
 
-    public void testNumberOfFragmentsCapsInDocumentOrder() {
-        String text = "Elasticsearch is fast. Elasticsearch is scalable. Elasticsearch is open.";
-        BytesRefBlock result = highlightSingle(config("elasticsearch", 2, 0, 0), text);
+    public void testNumberOfFragmentsSelectsBestScoringInDocumentOrder() {
+        // number_of_fragments is handed to Lucene as maxPassages, so it keeps the best N passages by score (Query DSL
+        // parity) and returns them in document order. The first sentence has the fewest matches and is dropped; the two
+        // higher-scoring sentences remain, still in document order. (The pre-V4 operator kept the first N in document
+        // order instead, which would have returned the first two sentences.)
+        String text = "One fox. Two fox fox. Three fox fox fox.";
+        BytesRefBlock result = highlightSingle(config("fox", 2, 0, 0), text);
         try {
             assertThat(result.getValueCount(0), equalTo(2));
             int first = result.getFirstValueIndex(0);
             BytesRef scratch = new BytesRef();
-            assertThat(result.getBytesRef(first, scratch).utf8ToString(), equalTo("<em>Elasticsearch</em> is fast."));
-            assertThat(result.getBytesRef(first + 1, scratch).utf8ToString(), equalTo("<em>Elasticsearch</em> is scalable."));
+            assertThat(result.getBytesRef(first, scratch).utf8ToString(), equalTo("Two <em>fox</em> <em>fox</em>."));
+            assertThat(result.getBytesRef(first + 1, scratch).utf8ToString(), equalTo("Three <em>fox</em> <em>fox</em> <em>fox</em>."));
         } finally {
             result.close();
         }
@@ -225,10 +242,14 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testNonBytesRefFieldThrows() {
+        Analyzer analyzer = new StandardAnalyzer();
         try (
             HighlightOperator operator = new HighlightOperator(
                 blockFactory(),
                 config("fox", 5, 0, 0),
+                analyzer,
+                HighlightQueryParser.parse(CONTENT, "fox", analyzer),
+                CONTENT,
                 new ExpressionEvaluator[] { identityEvaluator() }
             )
         ) {
@@ -242,19 +263,278 @@ public class HighlightOperatorTests extends OperatorTestCase {
         }
     }
 
+    public void testPhraseHighlightsAsSingleSpan() {
+        // A quoted phrase becomes a PhraseQuery; weight-matches mode wraps the whole matched span in one <em>…</em>.
+        BytesRefBlock result = highlightSingle(config("\"quick brown fox\"", 5, 0, 0), "The quick brown fox jumps over the lazy dog.");
+        try {
+            assertThat(value(result, 0), equalTo("The <em>quick brown fox</em> jumps over the lazy dog."));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testAdjacentTermsStillWrapIndependently() {
+        // Unquoted adjacent terms are an OR of independent term queries, so each match wraps on its own.
+        BytesRefBlock result = highlightSingle(config("quick brown fox", 5, 0, 0), "The quick brown fox jumps over the lazy dog.");
+        try {
+            assertThat(value(result, 0), equalTo("The <em>quick</em> <em>brown</em> <em>fox</em> jumps over the lazy dog."));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testWildcardQuery() {
+        BytesRefBlock result = highlightSingle(config("f?x", 5, 0, 0), "The fox jumps");
+        try {
+            assertThat(value(result, 0), equalTo("The <em>fox</em> jumps"));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testLeadingWildcardAllowed() {
+        // Leading wildcards are enabled (ES query_string default), so this parses and matches instead of throwing.
+        BytesRefBlock result = highlightSingle(config("*ox", 5, 0, 0), "The fox jumps");
+        try {
+            assertThat(value(result, 0), equalTo("The <em>fox</em> jumps"));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testPrefixQuery() {
+        BytesRefBlock result = highlightSingle(config("fo*", 5, 0, 0), "The fox and the fog");
+        try {
+            assertThat(value(result, 0), equalTo("The <em>fox</em> and the <em>fog</em>"));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testBareFuzzyUsesAutoFuzziness() {
+        // "quikc" is one transposition from "quick"; AUTO allows one edit for a 5-char term.
+        BytesRefBlock result = highlightSingle(config("quikc~", 5, 0, 0), "The quick fox");
+        try {
+            assertThat(value(result, 0), equalTo("The <em>quick</em> fox"));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testBareFuzzyAutoShortTermMeansExact() {
+        // AUTO gives a 2-char term 0 edits, so "fx~" requires an exact "fx" and does not match "fox". Lucene's default
+        // fuzzy distance (2 edits) WOULD match, so a null result proves the AUTO override is applied.
+        BytesRefBlock result = highlightSingle(config("fx~", 5, 0, 0), "The fox jumps");
+        try {
+            assertThat(result.isNull(0), equalTo(true));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testExplicitFuzzyEdits() {
+        // "fux~1" allows one edit, matching "fox".
+        BytesRefBlock result = highlightSingle(config("fux~1", 5, 0, 0), "The fox jumps");
+        try {
+            assertThat(value(result, 0), equalTo("The <em>fox</em> jumps"));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testRegexQuery() {
+        BytesRefBlock result = highlightSingle(config("/f[ao]x/", 5, 0, 0), "The fox jumps");
+        try {
+            assertThat(value(result, 0), equalTo("The <em>fox</em> jumps"));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testBooleanAndRequiresBothTerms() {
+        BytesRefBlock both = highlightSingle(config("fox AND dog", 5, 0, 0), "The fox and the dog play.");
+        try {
+            assertThat(value(both, 0), equalTo("The <em>fox</em> and the <em>dog</em> play."));
+        } finally {
+            both.close();
+        }
+        BytesRefBlock missing = highlightSingle(config("fox AND dog", 5, 0, 0), "The fox jumps");
+        try {
+            assertThat(missing.isNull(0), equalTo(true));
+        } finally {
+            missing.close();
+        }
+    }
+
+    public void testBooleanNotExcludes() {
+        // A prohibited term that is present makes the whole query not match the row, so nothing highlights. This pins the
+        // strict boolean semantics that weight-matches mode enforces.
+        BytesRefBlock present = highlightSingle(config("fox -dog", 5, 0, 0), "The fox and the dog play.");
+        try {
+            assertThat(present.isNull(0), equalTo(true));
+        } finally {
+            present.close();
+        }
+        BytesRefBlock absent = highlightSingle(config("fox -dog", 5, 0, 0), "The fox jumps");
+        try {
+            assertThat(value(absent, 0), equalTo("The <em>fox</em> jumps"));
+        } finally {
+            absent.close();
+        }
+    }
+
+    public void testRequiredOperator() {
+        // "+fox" is required, "cat" is optional; the row matches on the required term alone.
+        BytesRefBlock result = highlightSingle(config("+fox cat", 5, 0, 0), "The fox jumps");
+        try {
+            assertThat(value(result, 0), equalTo("The <em>fox</em> jumps"));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testGrouping() {
+        BytesRefBlock result = highlightSingle(config("(fox OR cat) AND jumps", 5, 0, 0), "The fox jumps");
+        try {
+            assertThat(value(result, 0), equalTo("The <em>fox</em> <em>jumps</em>"));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testFieldQualifiedTermDoesNotHighlight() {
+        // The single ON field is "content" and require_field_match is on, so a term qualified on another field targets
+        // a field that is not indexed and never matches (Query DSL require_field_match: true parity).
+        BytesRefBlock result = highlightSingle(config("title:fox", 5, 0, 0), "The fox jumps");
+        try {
+            assertThat(result.isNull(0), equalTo(true));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testPerFieldTargetingHighlightsOnlyTheTargetedColumn() {
+        // MATCH(title, "fox") targets only the title field: the title column highlights and the body column stays null,
+        // even though "fox" also appears in body. This is the design's §3.1 column-population contract.
+        Analyzer analyzer = new StandardAnalyzer();
+        Query query = HighlightQueryParser.parse(TITLE_BODY, "title:fox", analyzer);
+        BytesRefBlock title = bytesRefs(List.of(List.of("the quick fox")));
+        BytesRefBlock body = bytesRefs(List.of(List.of("a fox in the henhouse")));
+        Page result = highlightFields(config("title:fox", 5, 0, 0), query, TITLE_BODY, analyzer, title, body);
+        try {
+            BytesRefBlock highlightTitle = result.getBlock(2);
+            BytesRefBlock highlightBody = result.getBlock(3);
+            assertThat(value(highlightTitle, 0), equalTo("the quick <em>fox</em>"));
+            assertThat(highlightBody.isNull(0), equalTo(true));
+        } finally {
+            result.releaseBlocks();
+        }
+    }
+
+    public void testCrossFieldConjunctionHighlightsWholeRowOrNothing() {
+        // MATCH(title,"fox") AND MATCH(body,"dog"): row 0 satisfies both clauses, so both columns highlight; row 1 is
+        // missing "dog" in body, so the conjunction fails and NEITHER column highlights (whole-query boolean semantics
+        // under weight-matches, matching Query DSL highlight_query).
+        Analyzer analyzer = new StandardAnalyzer();
+        Query query = HighlightQueryParser.parse(TITLE_BODY, "+title:fox +body:dog", analyzer);
+        BytesRefBlock title = bytesRefs(List.of(List.of("the fox"), List.of("the fox")));
+        BytesRefBlock body = bytesRefs(List.of(List.of("a dog"), List.of("a cat")));
+        Page result = highlightFields(config("+title:fox +body:dog", 5, 0, 0), query, TITLE_BODY, analyzer, title, body);
+        try {
+            BytesRefBlock highlightTitle = result.getBlock(2);
+            BytesRefBlock highlightBody = result.getBlock(3);
+            assertThat(value(highlightTitle, 0), equalTo("the <em>fox</em>"));
+            assertThat(value(highlightBody, 0), equalTo("a <em>dog</em>"));
+            assertThat(highlightTitle.isNull(1), equalTo(true));
+            assertThat(highlightBody.isNull(1), equalTo(true));
+        } finally {
+            result.releaseBlocks();
+        }
+    }
+
+    public void testRowWithAllNullFieldsYieldsNullEverywhere() {
+        // A row where neither ON field has any value must emit null for every highlight column without building an index.
+        Analyzer analyzer = new StandardAnalyzer();
+        Query query = HighlightQueryParser.parse(TITLE_BODY, "fox", analyzer);
+        BytesRefBlock title = nulls(1);
+        BytesRefBlock body = nulls(1);
+        Page result = highlightFields(config("fox", 5, 0, 0), query, TITLE_BODY, analyzer, title, body);
+        try {
+            assertThat(result.<BytesRefBlock>getBlock(2).isNull(0), equalTo(true));
+            assertThat(result.<BytesRefBlock>getBlock(3).isNull(0), equalTo(true));
+        } finally {
+            result.releaseBlocks();
+        }
+    }
+
+    public void testStopWordOnlyQueryMatchesNothing() {
+        // Under a stop-word analyzer the only term is removed, leaving an empty query normalized to MatchNoDocsQuery.
+        Analyzer stop = new StandardAnalyzer(EnglishAnalyzer.ENGLISH_STOP_WORDS_SET);
+        BytesRefBlock result = highlight(config("the", 5, 0, 0), bytesRefs(List.of(List.of("the fox"))), stop);
+        try {
+            assertThat(result.isNull(0), equalTo(true));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testNoMatchSizeWithValidNonMatchingQuery() {
+        // A valid phrase that doesn't match still returns the leading text: no_match_size is independent of weight-matches.
+        BytesRefBlock result = highlightSingle(config("\"zebra stripes\"", 5, 0, 200), "Gardens bloom.");
+        try {
+            assertThat(value(result, 0), equalTo("Gardens bloom."));
+        } finally {
+            result.close();
+        }
+    }
+
     private BytesRefBlock highlightSingle(HighlightConfig config, String text) {
         return highlight(config, bytesRefs(List.of(List.of(text))));
     }
 
     private BytesRefBlock highlight(HighlightConfig config, BytesRefBlock input) {
+        return highlight(config, input, new StandardAnalyzer());
+    }
+
+    private BytesRefBlock highlight(HighlightConfig config, BytesRefBlock input, Analyzer analyzer) {
+        // The operator no longer parses; the query is built here over the single ON field with the same analyzer used
+        // to highlight, exactly as LocalExecutionPlanner does for a literal query.
+        Query query = HighlightQueryParser.parse(CONTENT, config.queryText(), analyzer);
         try (
-            HighlightOperator operator = new HighlightOperator(blockFactory(), config, new ExpressionEvaluator[] { identityEvaluator() })
+            HighlightOperator operator = new HighlightOperator(
+                blockFactory(),
+                config,
+                analyzer,
+                query,
+                CONTENT,
+                new ExpressionEvaluator[] { identityEvaluator() }
+            )
         ) {
             Page result = operator.process(new Page(input));
             BytesRefBlock highlighted = result.getBlock(result.getBlockCount() - 1);
             highlighted.incRef();
             result.releaseBlocks();
             return highlighted;
+        }
+    }
+
+    // Runs the operator over one block per ON field (channel f feeds field f) and returns the result page, whose last
+    // fieldNames.size() blocks are the highlight columns in ON order.
+    private Page highlightFields(HighlightConfig config, Query query, List<String> fieldNames, Analyzer analyzer, BytesRefBlock... fields) {
+        ExpressionEvaluator[] evaluators = IntStream.range(0, fields.length)
+            .mapToObj(HighlightOperatorTests::channelEvaluator)
+            .toArray(ExpressionEvaluator[]::new);
+        try (HighlightOperator operator = new HighlightOperator(blockFactory(), config, analyzer, query, fieldNames, evaluators)) {
+            return operator.process(new Page(fields));
+        }
+    }
+
+    private BytesRefBlock nulls(int count) {
+        try (BytesRefBlock.Builder builder = blockFactory().newBytesRefBlockBuilder(count)) {
+            for (int i = 0; i < count; i++) {
+                builder.appendNull();
+            }
+            return builder.build();
         }
     }
 
@@ -339,6 +619,31 @@ public class HighlightOperatorTests extends OperatorTestCase {
             @Override
             public String toString() {
                 return "identity";
+            }
+        };
+    }
+
+    // Feeds one input channel to one ON field, so multi-field tests can wire block[f] to fieldNames.get(f).
+    private static ExpressionEvaluator channelEvaluator(int channel) {
+        return new ExpressionEvaluator() {
+            @Override
+            public Block eval(Page page) {
+                Block block = page.getBlock(channel);
+                block.incRef();
+                return block;
+            }
+
+            @Override
+            public long baseRamBytesUsed() {
+                return 0;
+            }
+
+            @Override
+            public void close() {}
+
+            @Override
+            public String toString() {
+                return "channel" + channel;
             }
         };
     }

@@ -7,31 +7,9 @@
 lexer grammar Highlight;
 
 //
-// HIGHLIGHT [query_string] [ON field, ...] [WITH options]
+// HIGHLIGHT [prefix = "..."] query [ON field, ...] [WITH options]
 //
-DEV_HIGHLIGHT : {this.isDevVersion()}? 'highlight' -> pushMode(HIGHLIGHT_MODE);
-
-mode HIGHLIGHT_MODE;
-
-HIGHLIGHT_PIPE : PIPE -> type(PIPE), popMode;
-// explicit popMode of RP to allow HIGHLIGHT in FORK branches
-HIGHLIGHT_RP : RP -> type(RP), popMode, popMode;
-
-HIGHLIGHT_ON : ON -> type(ON);
-HIGHLIGHT_WITH : WITH -> type(WITH), popMode, pushMode(EXPRESSION_MODE);
-
-HIGHLIGHT_ASSIGN : ASSIGN -> type(ASSIGN);
-HIGHLIGHT_COMMA : COMMA -> type(COMMA);
-HIGHLIGHT_DOT : DOT -> type(DOT);
-
-HIGHLIGHT_QUOTED_STRING : QUOTED_STRING -> type(QUOTED_STRING);
-HIGHLIGHT_QUOTED_IDENTIFIER : QUOTED_IDENTIFIER -> type(QUOTED_IDENTIFIER);
-HIGHLIGHT_UNQUOTED_IDENTIFIER : UNQUOTED_IDENTIFIER -> type(UNQUOTED_IDENTIFIER);
-HIGHLIGHT_PARAM : PARAM -> type(PARAM);
-HIGHLIGHT_NAMED_OR_POSITIONAL_PARAM : NAMED_OR_POSITIONAL_PARAM -> type(NAMED_OR_POSITIONAL_PARAM);
-HIGHLIGHT_DOUBLE_PARAMS : DOUBLE_PARAMS -> type(DOUBLE_PARAMS);
-HIGHLIGHT_NAMED_OR_POSITIONAL_DOUBLE_PARAMS : NAMED_OR_POSITIONAL_DOUBLE_PARAMS -> type(NAMED_OR_POSITIONAL_DOUBLE_PARAMS);
-
-HIGHLIGHT_LINE_COMMENT : LINE_COMMENT -> channel(HIDDEN);
-HIGHLIGHT_MULTILINE_COMMENT : MULTILINE_COMMENT -> channel(HIDDEN);
-HIGHLIGHT_WS : WS -> channel(HIDDEN);
+// The query region and the ON fields are lexed in the shared EXPRESSION_MODE (like WHERE/RERANK) so the query can be a
+// full-text function expression (MATCH(...), QSTR(...), boolean combinations, the ':' operator) and not just a literal.
+// EXPRESSION_MODE already provides ON, WITH, commas, parentheses and function-call lexing, so no dedicated mode is needed.
+DEV_HIGHLIGHT : {this.isDevVersion()}? 'highlight' -> pushMode(EXPRESSION_MODE);

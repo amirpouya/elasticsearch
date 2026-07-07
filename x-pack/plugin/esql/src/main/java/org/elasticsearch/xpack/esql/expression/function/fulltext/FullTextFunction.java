@@ -50,6 +50,7 @@ import org.elasticsearch.xpack.esql.plan.logical.EsRelation;
 import org.elasticsearch.xpack.esql.plan.logical.ExternalRelation;
 import org.elasticsearch.xpack.esql.plan.logical.Filter;
 import org.elasticsearch.xpack.esql.plan.logical.Fork;
+import org.elasticsearch.xpack.esql.plan.logical.Highlight;
 import org.elasticsearch.xpack.esql.plan.logical.Limit;
 import org.elasticsearch.xpack.esql.plan.logical.LimitBy;
 import org.elasticsearch.xpack.esql.plan.logical.LogicalPlan;
@@ -220,6 +221,8 @@ public abstract class FullTextFunction extends Function
             checkFullTextFunctionsInAggs(agg, failures);
         } else if (plan instanceof LookupJoin lookupJoin) {
             checkFullTextQueryFunctionForCondition(plan, failures, lookupJoin.config().joinOnConditions(), true, true);
+        } else if (plan instanceof Highlight highlight) {
+            checkFullTextFunctionsInHighlight(plan, highlight, failures);
         } else {
             List<FullTextFunction> scoredFTFs = new ArrayList<>();
             plan.forEachExpression(Score.class, scoreFunction -> {
@@ -239,6 +242,28 @@ public abstract class FullTextFunction extends Function
                 }
             });
         }
+    }
+
+    private static void checkFullTextFunctionsInHighlight(LogicalPlan plan, Highlight highlight, Failures failures) {
+        // A HIGHLIGHT query may be a full-text expression, so collect the full-text functions under its query into an
+        // allow-list (same collect-and-allow pattern as Score above); a full-text function anywhere else in the node
+        // is not allowed and hits the failure below.
+        List<FullTextFunction> allowedFTFs = new ArrayList<>();
+        if (highlight.query() != null) {
+            highlight.query().forEachDown(FullTextFunction.class, allowedFTFs::add);
+        }
+        plan.forEachExpression(FullTextFunction.class, ftf -> {
+            if (allowedFTFs.remove(ftf) == false) {
+                failures.add(
+                    fail(
+                        ftf,
+                        "[{}] {} is only supported in WHERE and STATS commands or in EVAL within score(.) function",
+                        ftf.functionName(),
+                        ftf.functionType()
+                    )
+                );
+            }
+        });
     }
 
     private static void checkFullTextFunctionsInFilter(Filter filter, Failures failures, boolean checkFullTextFunctionsAboveSubqueries) {

@@ -7,10 +7,14 @@
 
 package org.elasticsearch.xpack.esql.plan.logical;
 
+import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.lucene.BytesRefs;
+import org.elasticsearch.compute.operator.HighlightQueryParser;
 import org.elasticsearch.xpack.esql.capabilities.PostAnalysisVerificationAware;
 import org.elasticsearch.xpack.esql.capabilities.TelemetryAware;
 import org.elasticsearch.xpack.esql.common.Failures;
@@ -29,6 +33,7 @@ import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.io.stream.PlanStreamInput;
 import org.elasticsearch.xpack.esql.plan.GeneratingPlan;
+import org.elasticsearch.xpack.esql.planner.HighlightQueryTranslator;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -38,7 +43,6 @@ import java.util.Objects;
 import static org.elasticsearch.xpack.esql.common.Failure.fail;
 import static org.elasticsearch.xpack.esql.expression.NamedExpressions.mergeOutputAttributes;
 
-// TODO: carry an analyzer name here once the "analyzer" option is supported.
 public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPlan<Highlight>, PostAnalysisVerificationAware {
 
     public static final NamedWriteableRegistry.Entry ENTRY = new NamedWriteableRegistry.Entry(
@@ -48,6 +52,14 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
     );
 
     public static final String DEFAULT_PREFIX = "highlight_";
+
+    /**
+     * Analyzer used both to verify the query text (here) and to tokenize/highlight at execution time
+     * ({@code LocalExecutionPlanner#planHighlight}). HIGHLIGHT always uses this single shared, stateless
+     * {@link StandardAnalyzer}: sharing one instance avoids allocating one per verification/plan and keeps the analyzer
+     * identical across the two sites. Analyzers are thread-safe; this one is never closed.
+     */
+    public static final Analyzer DEFAULT_ANALYZER = new StandardAnalyzer();
 
     // Options honoured by HighlightOptions and the unified highlighter.
     public static final String PRE_TAGS = "pre_tags";
@@ -230,6 +242,8 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
 
     @Override
     public void postAnalysisVerification(Failures failures) {
+        verifyFieldTypes(failures);
+        verifyQuery(failures);
         if (options == null) {
             return;
         }
@@ -238,6 +252,67 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
         verifyEnum(failures, HighlightOptions.ORDER_OPTION);
         for (String name : VALID_OPTION_NAMES) {
             verifyValue(failures, name);
+        }
+    }
+
+    /**
+     * Builds the query the same way {@code LocalExecutionPlanner#planHighlight} will at execution, so an unsupported
+     * function/expression/option or a {@code query_string} syntax error fails fast at verification instead of at
+     * execution. A foldable string is parsed with {@code query_string} over the ON fields (generalized to multiple
+     * fields); any other expression is routed through {@link HighlightQueryTranslator}. Both paths use the default
+     * {@link #DEFAULT_ANALYZER}, and sharing the two code paths with execution guarantees the two sites never disagree.
+     * Returns early when the query is null or unresolved.
+     */
+    private void verifyQuery(Failures failures) {
+        if (query == null || query.resolved() == false) {
+            return;
+        }
+        List<String> fieldNames = fields.stream().map(NamedExpression::name).toList();
+        try {
+            String literal = queryTextIfLiteral(query);
+            if (literal != null) {
+                HighlightQueryParser.parse(fieldNames, literal, DEFAULT_ANALYZER);
+            } else {
+                HighlightQueryTranslator.translate(query, fieldNames, DEFAULT_ANALYZER);
+            }
+        } catch (RuntimeException e) {
+            // Broad catch mirrors verifyValue and turns pathological Lucene errors (e.g. a TooComplexToDeterminizeException
+            // from a huge regex) into a 400. The message is passed as an argument so any {} or [] in the user's query text
+            // is not misread as a format placeholder.
+            failures.add(fail(this, "{}", e.getMessage()));
+        }
+    }
+
+    /**
+     * Returns the query as a plain string when it is a foldable string (the {@code query_string} literal source), or
+     * {@code null} when it is a full-text function expression that must be routed through
+     * {@link HighlightQueryTranslator} instead.
+     */
+    public static String queryTextIfLiteral(Expression query) {
+        if (query.foldable() == false) {
+            return null;
+        }
+        Object folded = query.fold(FoldContext.small());
+        return folded instanceof BytesRef || folded instanceof String ? BytesRefs.toString(folded) : null;
+    }
+
+    /**
+     * Fails fast with a clean 400 when an {@code ON} field is not a {@code text}/{@code keyword} column, rather than
+     * letting {@code HighlightOperator} throw an {@link IllegalArgumentException} (a 500) at execution time. Unresolved
+     * fields are skipped here: they are reported separately as unknown columns.
+     */
+    private void verifyFieldTypes(Failures failures) {
+        for (NamedExpression field : fields) {
+            if (field.resolved() && DataType.isString(field.dataType()) == false) {
+                failures.add(
+                    fail(
+                        field,
+                        "HIGHLIGHT ON field [{}] must be [text] or [keyword], found [{}]",
+                        field.name(),
+                        field.dataType().typeName()
+                    )
+                );
+            }
         }
     }
 

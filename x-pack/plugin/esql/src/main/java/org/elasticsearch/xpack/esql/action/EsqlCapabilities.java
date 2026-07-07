@@ -3303,8 +3303,18 @@ public class EsqlCapabilities {
         /**
          * Support for the {@code HIGHLIGHT} command: grammar, plan nodes, serialization, and execution that exposes
          * generated columns named {@code <prefix><field>} ({@code highlight_} by default). Snapshot-only.
+         * <p>
+         * History:
+         * <ul>
+         *     <li>V2: analyzer-aware execution with bag-of-words (OR of terms) matching.</li>
+         *     <li>V3: the query text is parsed with Lucene {@code query_string} (classic) syntax — phrases, boolean
+         *     operators, wildcards, prefixes, fuzzy and regex terms, with syntax errors rejected at verification — and
+         *     weight-matches highlighting wraps a matched phrase in a single {@code <em>} span.</li>
+         *     <li>V4: query may be a full-text expression (MATCH, MATCH_PHRASE, QSTR, ':', boolean combinations);
+         *     per-real-field highlighting semantics (field-qualified terms highlight their ON field).</li>
+         * </ul>
          */
-        HIGHLIGHT_V3(Build.current().isSnapshot()),
+        HIGHLIGHT_V4(Build.current().isSnapshot()),
 
         /**
          * Support for PromQL {@code histogram_quantile()} over classic histograms with {@code le} buckets.

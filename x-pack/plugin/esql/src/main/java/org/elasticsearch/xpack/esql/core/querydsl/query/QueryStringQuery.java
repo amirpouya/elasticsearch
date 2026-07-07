@@ -111,6 +111,10 @@ public class QueryStringQuery extends Query {
         return query;
     }
 
+    public Map<String, Object> options() {
+        return options;
+    }
+
     @Override
     public int hashCode() {
         return Objects.hash(query, fields);

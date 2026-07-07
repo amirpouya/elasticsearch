@@ -7,6 +7,7 @@
 
 package org.elasticsearch.xpack.esql.planner;
 
+import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.TransportVersion;
 import org.elasticsearch.cluster.ClusterName;
@@ -42,6 +43,7 @@ import org.elasticsearch.compute.operator.FilterOperator.FilterOperatorFactory;
 import org.elasticsearch.compute.operator.GroupedLimitOperator;
 import org.elasticsearch.compute.operator.HighlightConfig;
 import org.elasticsearch.compute.operator.HighlightOperator;
+import org.elasticsearch.compute.operator.HighlightQueryParser;
 import org.elasticsearch.compute.operator.LimitOperator;
 import org.elasticsearch.compute.operator.LocalSourceOperator;
 import org.elasticsearch.compute.operator.LocalSourceOperator.LocalSourceFactory;
@@ -152,6 +154,7 @@ import org.elasticsearch.xpack.esql.optimizer.rules.physical.ProjectAwayColumns;
 import org.elasticsearch.xpack.esql.optimizer.rules.physical.local.ExternalSourceAggregatePushdown;
 import org.elasticsearch.xpack.esql.plan.logical.EsRelation;
 import org.elasticsearch.xpack.esql.plan.logical.Grok;
+import org.elasticsearch.xpack.esql.plan.logical.Highlight;
 import org.elasticsearch.xpack.esql.plan.logical.HighlightOptions;
 import org.elasticsearch.xpack.esql.plan.logical.LogicalPlan;
 import org.elasticsearch.xpack.esql.plan.physical.AggregateExec;
@@ -1316,10 +1319,28 @@ public class LocalExecutionPlanner {
 
         Expression queryExpr = highlight.query();
         if (queryExpr == null) {
-            throw new EsqlIllegalArgumentException("HIGHLIGHT requires an explicit query string");
+            throw new EsqlIllegalArgumentException("HIGHLIGHT requires an explicit query");
         }
-        String queryText = BytesRefs.toString(queryExpr.fold(context.foldCtx));
         HighlightOptions options = HighlightOptions.from(highlight.options(), context.foldCtx());
+        // HIGHLIGHT always tokenizes and highlights with the default StandardAnalyzer.
+        Analyzer analyzer = Highlight.DEFAULT_ANALYZER;
+        List<String> fieldNames = highlight.fields().stream().map(field -> field.name()).toList();
+
+        // Build the Lucene query once per node, over the real ON field names. A foldable string is parsed as
+        // query_string over the ON fields (generalized to multiple fields); any other expression is a full-text
+        // function that HighlightQueryTranslator turns into a context-free query. Both paths mirror the verification
+        // in Highlight#verifyQuery, so a query that verifies always plans.
+        String literal = Highlight.queryTextIfLiteral(queryExpr);
+        String queryText;
+        org.apache.lucene.search.Query query;
+        if (literal != null) {
+            queryText = literal;
+            query = HighlightQueryParser.parse(fieldNames, literal, analyzer);
+        } else {
+            queryText = queryExpr.sourceText();
+            query = HighlightQueryTranslator.translate(queryExpr, fieldNames, analyzer);
+        }
+
         HighlightConfig config = new HighlightConfig(
             queryText,
             options.preTag(),
@@ -1345,7 +1366,7 @@ public class LocalExecutionPlanner {
         Layout.Builder layoutBuilder = source.layout.builder();
         layoutBuilder.append(highlight.generatedFields());
 
-        return source.with(new HighlightOperator.Factory(config, fieldEvaluators), layoutBuilder.build());
+        return source.with(new HighlightOperator.Factory(config, analyzer, query, fieldNames, fieldEvaluators), layoutBuilder.build());
     }
 
     private PhysicalOperation planHashJoin(HashJoinExec join, LocalExecutionPlannerContext context) {
