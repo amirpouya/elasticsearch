@@ -1295,7 +1295,6 @@ public class StatementParserTests extends AbstractStatementParserTests {
 
     public void testHighlightFieldNamedPrefix() {
         assumeTrue("requires HIGHLIGHT_V4 capability", EsqlCapabilities.Cap.HIGHLIGHT_V4.isEnabled());
-        // `prefix` remains a regular identifier and can still be used as a field name.
         LogicalPlan plan = query("FROM foo | HIGHLIGHT \"elasticsearch\" ON prefix");
         Highlight highlight = as(plan, Highlight.class);
         assertThat(highlight.prefix(), equalTo("highlight_"));
@@ -1314,7 +1313,6 @@ public class StatementParserTests extends AbstractStatementParserTests {
 
     public void testHighlightRejectsUnknownModifier() {
         assumeTrue("requires HIGHLIGHT_V4 capability", EsqlCapabilities.Cap.HIGHLIGHT_V4.isEnabled());
-        // Only `prefix = ...` is accepted as a modifier.
         expectThrows(
             ParsingException.class,
             containsString("Invalid modifier [bogus] in HIGHLIGHT, expected [prefix]"),
@@ -1358,7 +1356,6 @@ public class StatementParserTests extends AbstractStatementParserTests {
         assumeTrue("requires HIGHLIGHT_V4 capability", EsqlCapabilities.Cap.HIGHLIGHT_V4.isEnabled());
         LogicalPlan plan = query("FROM foo | HIGHLIGHT MATCH(title, \"x\") ON title");
         Highlight highlight = as(plan, Highlight.class);
-        // Functions are still unresolved at parse time; resolution/verification happens later.
         UnresolvedFunction match = as(highlight.query(), UnresolvedFunction.class);
         assertThat(match.name(), equalTo("MATCH"));
         assertThat(highlight.fields().size(), equalTo(1));
@@ -1367,8 +1364,6 @@ public class StatementParserTests extends AbstractStatementParserTests {
 
     public void testHighlightAcceptsExpressionQueryShapes() {
         assumeTrue("requires HIGHLIGHT_V4 capability", EsqlCapabilities.Cap.HIGHLIGHT_V4.isEnabled());
-        // Every shape that the grammar now accepts as a query. Semantic validity (e.g. `a > 5` is not a full-text
-        // function; QSTR/MATCH argument checks) is enforced later at verification, not at parse time.
         as(query("FROM foo | HIGHLIGHT MATCH_PHRASE(title, \"x\") ON title"), Highlight.class);
         as(query("FROM foo | HIGHLIGHT QSTR(\"a AND b\") ON title"), Highlight.class);
         as(query("FROM foo | HIGHLIGHT MATCH(title, \"x\") OR MATCH(body, \"y\") ON title, body"), Highlight.class);
@@ -1380,8 +1375,6 @@ public class StatementParserTests extends AbstractStatementParserTests {
 
     public void testHighlightPrefixWithExpressionQuery() {
         assumeTrue("requires HIGHLIGHT_V4 capability", EsqlCapabilities.Cap.HIGHLIGHT_V4.isEnabled());
-        // The `prefix = "..."` modifier stays unambiguous in front of an expression query (ASSIGN cannot start a
-        // booleanExpression).
         LogicalPlan plan = query("FROM foo | HIGHLIGHT prefix = \"h_\" MATCH(title, \"x\") ON title");
         Highlight highlight = as(plan, Highlight.class);
         assertThat(highlight.prefix(), equalTo("h_"));
@@ -1390,8 +1383,6 @@ public class StatementParserTests extends AbstractStatementParserTests {
 
     public void testHighlightTerminatesInsideFork() {
         assumeTrue("requires HIGHLIGHT_V4 capability", EsqlCapabilities.Cap.HIGHLIGHT_V4.isEnabled());
-        // Pins that the query region terminates correctly at the closing `)` of a FORK branch (the historical reason
-        // the retired HIGHLIGHT lexer mode popped twice on RP). A following branch must still parse.
         LogicalPlan plan = query("""
             FROM foo
             | FORK ( HIGHLIGHT MATCH(title, "x") ON title )

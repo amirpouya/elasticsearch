@@ -48,12 +48,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.startsWith;
 
-/**
- * Unit tests for {@link HighlightQueryTranslator}, asserting the shape of the Lucene {@link Query} produced for each
- * supported HIGHLIGHT query expression. These pin the query-construction contract that the end-to-end highlighting in
- * {@code HighlightOperatorTests} and the csv-spec fixtures rely on. HIGHLIGHT always tokenizes with the default
- * {@link StandardAnalyzer}.
- */
+/** Unit tests for {@link HighlightQueryTranslator}. */
 public class HighlightQueryTranslatorTests extends ESTestCase {
 
     private static final List<String> TITLE = List.of("title");
@@ -103,7 +98,6 @@ public class HighlightQueryTranslatorTests extends ESTestCase {
     }
 
     public void testLiteralAllTermsFilteredIsMatchNoDocs() {
-        // "the" is a stop word, so the parsed query has no clauses and is normalized to MatchNoDocsQuery.
         Query query = HighlightQueryTranslator.translateLiteral("the", TITLE, new StandardAnalyzer(EnglishAnalyzer.ENGLISH_STOP_WORDS_SET));
         assertThat(query, instanceOf(MatchNoDocsQuery.class));
     }
@@ -125,13 +119,11 @@ public class HighlightQueryTranslatorTests extends ESTestCase {
     }
 
     public void testLiteralBareFuzzyUsesAutoDistance() {
-        // AUTO fuzziness gives a term of length 3-5 a single edit.
         FuzzyQuery query = asInstanceOf(FuzzyQuery.class, translateLiteral("quick~"));
         assertThat(query.getMaxEdits(), equalTo(1));
     }
 
     public void testLiteralShortBareFuzzyIsZeroEdits() {
-        // AUTO fuzziness gives a term of length <= 2 zero edits.
         FuzzyQuery query = asInstanceOf(FuzzyQuery.class, translateLiteral("fx~"));
         assertThat(query.getMaxEdits(), equalTo(0));
     }
@@ -151,7 +143,6 @@ public class HighlightQueryTranslatorTests extends ESTestCase {
     }
 
     public void testLiteralInvalidFuzzinessThrows() {
-        // Fuzziness rejects a fractional edit distance, surfaced as an IllegalArgumentException during parsing.
         IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> translateLiteral("fox~0.5"));
         assertThat(e.getMessage(), startsWith("Invalid query [fox~0.5] in HIGHLIGHT:"));
     }
@@ -189,7 +180,6 @@ public class HighlightQueryTranslatorTests extends ESTestCase {
     }
 
     public void testMatchFuzziness() {
-        // AUTO fuzziness gives a term of length 3-5 a single edit.
         FuzzyQuery fuzzy = asInstanceOf(FuzzyQuery.class, translate(match("title", "fox", options("fuzziness", "AUTO")), TITLE));
         assertThat(fuzzy.getTerm(), equalTo(new Term("title", "fox")));
         assertThat(fuzzy.getMaxEdits(), equalTo(1));
@@ -234,7 +224,6 @@ public class HighlightQueryTranslatorTests extends ESTestCase {
     }
 
     public void testQueryStringFieldQualifiedTargetsThatField() {
-        // A field-qualified term hits only that field, even though both are ON fields (require_field_match parity).
         Query query = translate(queryString("title:fox", null), TITLE_BODY);
         assertThat(terms(query), containsInAnyOrder(new Term("title", "fox")));
     }
@@ -291,7 +280,6 @@ public class HighlightQueryTranslatorTests extends ESTestCase {
     }
 
     public void testNestedBoolean() {
-        // MATCH(title,"fox") AND (MATCH(title,"quick") OR MATCH(body,"bar"))
         And and = new And(EMPTY, match("title", "fox", null), new Or(EMPTY, match("title", "quick", null), match("body", "bar", null)));
         BooleanQuery bq = asInstanceOf(BooleanQuery.class, translate(and, TITLE_BODY));
         assertThat(bq.clauses(), hasSize(2));
@@ -319,10 +307,7 @@ public class HighlightQueryTranslatorTests extends ESTestCase {
         assertThat(e.getMessage(), containsString("HIGHLIGHT query must be a full-text function"));
     }
 
-    /**
-     * Recursively collects every {@link Term} referenced by the query, unwrapping the boolean/boost/phrase/term/fuzzy
-     * shapes the translator can emit, so tests can assert the target field of each term regardless of nesting.
-     */
+    /** Collects terms referenced by a translated query. */
     private static List<Term> terms(Query query) {
         List<Term> collected = new ArrayList<>();
         collectTerms(query, collected);

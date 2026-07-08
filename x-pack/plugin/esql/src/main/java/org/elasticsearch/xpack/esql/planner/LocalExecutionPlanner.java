@@ -1321,14 +1321,11 @@ public class LocalExecutionPlanner {
             throw new EsqlIllegalArgumentException("HIGHLIGHT requires an explicit query");
         }
         HighlightOptions options = HighlightOptions.from(highlight.options(), context.foldCtx());
-        // HIGHLIGHT always tokenizes and highlights with the default StandardAnalyzer.
+        // HIGHLIGHT uses the default StandardAnalyzer.
         Analyzer analyzer = Highlight.DEFAULT_ANALYZER;
         List<String> fieldNames = highlight.fields().stream().map(field -> field.name()).toList();
 
-        // Build the Lucene query once per node, over the real ON field names. A foldable string is parsed as
-        // query_string over the ON fields (generalized to multiple fields); any other expression is a full-text
-        // function that HighlightQueryTranslator turns into a context-free query. Both paths mirror the verification
-        // in Highlight#verifyQuery, so a query that verifies always plans.
+        // Build the Lucene query once per node over the ON fields.
         String literal = Highlight.queryTextIfLiteral(queryExpr);
         String queryText;
         org.apache.lucene.search.Query query;
@@ -1360,8 +1357,6 @@ public class LocalExecutionPlanner {
             .toList();
 
         // Append one keyword column per highlighted field.
-        // The generated attributes are appended in the same order as the ON fields,
-        // so the operator's appended blocks line up with these layout channels.
         Layout.Builder layoutBuilder = source.layout.builder();
         layoutBuilder.append(highlight.generatedFields());
 

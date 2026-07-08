@@ -52,12 +52,7 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
 
     public static final String DEFAULT_PREFIX = "highlight_";
 
-    /**
-     * Analyzer used both to verify the query text (here) and to tokenize/highlight at execution time
-     * ({@code LocalExecutionPlanner#planHighlight}). HIGHLIGHT always uses this single shared, stateless
-     * {@link StandardAnalyzer}: sharing one instance avoids allocating one per verification/plan and keeps the analyzer
-     * identical across the two sites. Analyzers are thread-safe; this one is never closed.
-     */
+    /** Analyzer used by both verification and execution. */
     public static final Analyzer DEFAULT_ANALYZER = new StandardAnalyzer();
 
     // Options honoured by HighlightOptions and the unified highlighter.
@@ -72,8 +67,7 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
     public static final String ORDER = "order";
     public static final String MAX_ANALYZED_OFFSET = "max_analyzed_offset";
 
-    // Accepted for Query DSL parity but only used by the FastVectorHighlighter, so they are no-ops for the unified
-    // highlighter that HIGHLIGHT always uses.
+    // Accepted for Query DSL compatibility but ignored by the unified highlighter.
     public static final String BOUNDARY_CHARS = "boundary_chars";
     public static final String BOUNDARY_MAX_SCAN = "boundary_max_scan";
     public static final String PHRASE_LIMIT = "phrase_limit";
@@ -98,11 +92,7 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
     private final Expression query;
     private final List<NamedExpression> fields;
     private final MapExpression options;
-    /**
-     * The generated attributes for the highlighted fields.
-     * These are appended to the child's output in the same order as the ON fields,
-     * so the operator's appended blocks line up with these layout channels.
-     */
+    /** Generated attributes for highlighted fields. */
     private final List<Attribute> generatedFields;
 
     public Highlight(
@@ -171,10 +161,7 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
         return VALID_OPTION_NAMES;
     }
 
-    /**
-     * Builds nullable {@code <prefix><field>} keyword attributes for the given highlight fields.
-     * A generated name that collides with existing output shadows the earlier column.
-     */
+    /** Builds nullable {@code <prefix><field>} keyword attributes for highlight fields. */
     public static List<Attribute> generatedAttributesFor(Source source, String prefix, List<NamedExpression> fields) {
         return fields.stream()
             .map(f -> (Attribute) new ReferenceAttribute(source, null, prefix + f.name(), DataType.KEYWORD, Nullability.TRUE, null, false))
@@ -222,7 +209,7 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
 
     @Override
     protected AttributeSet computeReferences() {
-        // Only the ON fields are inputs; the generated <prefix><field> columns are outputs, not references.
+        // Generated columns are outputs, not references.
         return Expressions.references(fields);
     }
 
@@ -254,14 +241,7 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
         }
     }
 
-    /**
-     * Builds the query the same way {@code LocalExecutionPlanner#planHighlight} will at execution, so an unsupported
-     * function/expression/option or a {@code query_string} syntax error fails fast at verification instead of at
-     * execution. A foldable string is parsed with {@code query_string} over the ON fields (generalized to multiple
-     * fields); any other expression is routed through {@link HighlightQueryTranslator}. Both paths use the default
-     * {@link #DEFAULT_ANALYZER}, and sharing the two code paths with execution guarantees the two sites never disagree.
-     * Returns early when the query is null or unresolved.
-     */
+    /** Builds the query during verification using the same path used in planning. */
     private void verifyQuery(Failures failures) {
         if (query == null || query.resolved() == false) {
             return;
@@ -275,18 +255,12 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
                 HighlightQueryTranslator.translate(query, fieldNames, DEFAULT_ANALYZER);
             }
         } catch (RuntimeException e) {
-            // Broad catch mirrors verifyValue and turns pathological Lucene errors (e.g. a TooComplexToDeterminizeException
-            // from a huge regex) into a 400. The message is passed as an argument so any {} or [] in the user's query text
-            // is not misread as a format placeholder.
+            // Convert parser/runtime failures into analysis failures.
             failures.add(fail(this, "{}", e.getMessage()));
         }
     }
 
-    /**
-     * Returns the query as a plain string when it is a foldable string (the {@code query_string} literal source), or
-     * {@code null} when it is a full-text function expression that must be routed through
-     * {@link HighlightQueryTranslator} instead.
-     */
+    /** Returns folded string query text, or {@code null} for non-literal queries. */
     public static String queryTextIfLiteral(Expression query) {
         if (query.foldable() == false) {
             return null;
@@ -295,11 +269,7 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
         return folded instanceof BytesRef || folded instanceof String ? BytesRefs.toString(folded) : null;
     }
 
-    /**
-     * Fails fast with a clean 400 when an {@code ON} field is not a {@code text}/{@code keyword} column, rather than
-     * letting {@code HighlightOperator} throw an {@link IllegalArgumentException} (a 500) at execution time. Unresolved
-     * fields are skipped here: they are reported separately as unknown columns.
-     */
+    /** Verifies that resolved ON fields are string-typed. */
     private void verifyFieldTypes(Failures failures) {
         for (NamedExpression field : fields) {
             if (field.resolved() && DataType.isString(field.dataType()) == false) {

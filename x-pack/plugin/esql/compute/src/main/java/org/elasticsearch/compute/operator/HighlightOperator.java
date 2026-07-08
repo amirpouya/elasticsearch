@@ -45,18 +45,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.function.Supplier;
 
-/**
- * Appends one highlighted keyword column per ON field.
- * <p>
- * For each row, all ON fields are indexed in one {@link MemoryIndex} under their real field names, then highlighted
- * per field with strict field matching. This preserves whole-query boolean behavior and Query DSL-style
- * {@code require_field_match}.
- * <p>
- * Uses the coordinator-side MemoryIndex path (POSTINGS offsets), like {@code TOP_SNIPPETS}.
- */
+/** Appends one highlighted keyword column per ON field. */
 public class HighlightOperator extends AbstractPageMappingOperator {
 
-    /** Synthetic field used only by the single-field parser entry point. */
+    /** Synthetic field for single-field parser entry points. */
     public static final String CONTENT_FIELD = "content";
 
     public record Factory(
@@ -106,20 +98,20 @@ public class HighlightOperator extends AbstractPageMappingOperator {
         this.config = config;
         this.fieldEvaluators = fieldEvaluators;
         this.analyzer = analyzer;
-        // The planner builds/parses the Lucene query once; this operator only executes it.
+        // Query is built in the planner.
         this.query = query;
         this.fieldNames = fieldNames;
         Encoder encoder = HighlightConfig.HTML_ENCODER.equals(config.encoder()) ? new SimpleHTMLEncoder() : new DefaultEncoder();
         this.formatter = new CustomPassageFormatter(config.preTag(), config.postTag(), encoder, config.numberOfFragments());
-        // Clamp user max_analyzed_offset to the default index cap used on the coordinator.
+        // Cap query offset to the default index max.
         this.indexMaxAnalyzedOffset = IndexSettings.MAX_ANALYZED_OFFSET_SETTING.get(Settings.EMPTY);
         int configuredOffset = config.maxAnalyzedOffset();
         int queryOffset = configuredOffset < 0 ? indexMaxAnalyzedOffset : Math.min(configuredOffset, indexMaxAnalyzedOffset);
         this.queryMaxAnalyzedOffset = QueryMaxAnalyzedOffset.create(queryOffset, indexMaxAnalyzedOffset);
-        // Unwrap NamedAnalyzer before LimitTokenOffsetAnalyzer wrapping.
+        // Unwrap NamedAnalyzer before wrapping.
         Analyzer indexingAnalyzer = analyzer instanceof NamedAnalyzer named ? named.analyzer() : analyzer;
         this.memoryIndexAnalyzer = new LimitTokenOffsetAnalyzer(indexingAnalyzer, queryMaxAnalyzedOffset.getNotNull());
-        // number_of_fragments=0 means whole value; otherwise Lucene chooses top-N passages.
+        // number_of_fragments=0 means whole value.
         this.highlighterNumberOfFragments = config.numberOfFragments() > 0 ? config.numberOfFragments() : Integer.MAX_VALUE - 1;
         this.breakIteratorSupplier = breakIterator(
             config.numberOfFragments(),
@@ -143,7 +135,7 @@ public class HighlightOperator extends AbstractPageMappingOperator {
         };
     }
 
-    // Break by sentence; optionally cap sentence length with fragment_size.
+    // Break by sentence; optionally cap length with fragment_size.
     private static BreakIterator sentenceBreakIterator(int fragmentSize, Locale locale) {
         return fragmentSize > 0 ? BoundedBreakIteratorScanner.getSentence(locale, fragmentSize) : BreakIterator.getSentenceInstance(locale);
     }
@@ -167,7 +159,7 @@ public class HighlightOperator extends AbstractPageMappingOperator {
             success = true;
             return result;
         } finally {
-            // Release temporary blocks/builders; release built result blocks only on failure.
+            // Release temporary data; release built blocks only on failure.
             Releasables.closeExpectNoException(fields);
             if (success == false) {
                 Releasables.closeExpectNoException(highlightedBlocks);
@@ -266,7 +258,7 @@ public class HighlightOperator extends AbstractPageMappingOperator {
         }
     }
 
-    /** Joins multi-valued field values using the highlighter multi-value separator. */
+    /** Joins multi-valued field values with the highlighter separator. */
     private static String joinValues(BytesRefBlock fieldValues, int row, int valueCount, BytesRef scratch) {
         int firstValueIndex = fieldValues.getFirstValueIndex(row);
         if (valueCount == 1) {
@@ -297,7 +289,7 @@ public class HighlightOperator extends AbstractPageMappingOperator {
             highlighterNumberOfFragments,
             indexMaxAnalyzedOffset,
             queryMaxAnalyzedOffset,
-            // Both must be true to keep weight-matches behavior and strict per-field matching.
+            // Keep weight matches and strict per-field matching.
             true,
             true
         );
@@ -305,7 +297,7 @@ public class HighlightOperator extends AbstractPageMappingOperator {
         return highlighter.highlightField(leaf.reader(), 0, () -> text);
     }
 
-    /** Appends null/single/multi-value snippets for one row. */
+    /** Appends snippets for one row. */
     private void appendSnippets(BytesRefBlock.Builder builder, Snippet[] snippets) {
         if (snippets == null || snippets.length == 0) {
             builder.appendNull();
@@ -329,7 +321,7 @@ public class HighlightOperator extends AbstractPageMappingOperator {
         builder.endPositionEntry();
     }
 
-    // Sort by highest score first; treat NaN as lowest so fallback passages stay last.
+    // Sort by highest score first; treat NaN as lowest.
     static final Comparator<Snippet> SCORE_DESCENDING = Comparator.comparingDouble((Snippet s) -> {
         float score = s.getScore();
         return Float.isNaN(score) ? Double.NEGATIVE_INFINITY : score;

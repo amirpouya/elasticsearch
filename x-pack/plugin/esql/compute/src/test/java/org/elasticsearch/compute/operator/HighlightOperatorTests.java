@@ -116,8 +116,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testEmptyQueryHasNoTermsAndDoesNotMatch() {
-        // Lucene's query parser throws on blank input, so the planner short-circuits it to a MatchNoDocsQuery;
-        // with the default no_match_size = 0 the row yields null.
         BytesRefBlock result = highlightSingle(config("", 5, 0, 0), new MatchNoDocsQuery("HIGHLIGHT query is empty"), "any text here");
         try {
             assertThat(result.isNull(0), equalTo(true));
@@ -141,10 +139,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testNumberOfFragmentsSelectsBestScoringInDocumentOrder() {
-        // number_of_fragments is handed to Lucene as maxPassages, so it keeps the best N passages by score (Query DSL
-        // parity) and returns them in document order. The first sentence has the fewest matches and is dropped; the two
-        // higher-scoring sentences remain, still in document order. (The pre-V4 operator kept the first N in document
-        // order instead, which would have returned the first two sentences.)
         String text = "One fox. Two fox fox. Three fox fox fox.";
         BytesRefBlock result = highlightSingle(config("fox", 2, 0, 0), text);
         try {
@@ -162,7 +156,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
         String text = "Elasticsearch powers fast search across very many documents and shards in a single cluster.";
         BytesRefBlock result = highlightSingle(config("elasticsearch", 5, 20, 0), text);
         try {
-            // With a 20-char bound the matched fragment is shorter than the full sentence.
             assertThat(value(result, 0).length(), lessThan(text.length() + "<em></em>".length()));
             assertThat(value(result, 0).contains("<em>Elasticsearch</em>"), equalTo(true));
         } finally {
@@ -197,7 +190,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
         String text = "Elasticsearch powers fast search across very many documents and shards in a single cluster.";
         BytesRefBlock result = highlight(config("elasticsearch", 5, 20, 0, true, false), bytesRefs(List.of(List.of(text))));
         try {
-            // The word scanner ignores fragment_size and breaks on word boundaries, so the fragment is short.
             assertThat(value(result, 0).contains("<em>Elasticsearch</em>"), equalTo(true));
             assertThat(value(result, 0).length(), lessThan(text.length() + "<em></em>".length()));
         } finally {
@@ -206,7 +198,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testOrderByScoreReturnsBestFragmentFirst() {
-        // The second sentence has two matches, so it scores higher and must come first when ordering by score.
         String text = "Search is fast. Fast search powers fast results. Indexing is simple.";
         BytesRefBlock result = highlight(config("fast", 5, 0, 0, false, true), bytesRefs(List.of(List.of(text))));
         try {
@@ -229,7 +220,7 @@ public class HighlightOperatorTests extends OperatorTestCase {
         }
     }
 
-    // The no-match fallback passage carries a NaN score, which must sort last rather than first under order=score.
+    // The no-match fallback passage has a NaN score and must sort last.
     public void testScoreDescendingTreatsNaNAsLowest() {
         Snippet best = new Snippet("best", 5.0f, true);
         Snippet worst = new Snippet("worst", 1.0f, true);
@@ -239,7 +230,7 @@ public class HighlightOperatorTests extends OperatorTestCase {
         assertThat(Arrays.stream(snippets).map(Snippet::getText).toList(), contains("best", "worst", "no-match-fallback"));
     }
 
-    // Equal scores keep document order because Arrays.sort is stable and the comparator returns 0 on ties.
+    // Equal scores keep document order.
     public void testScoreDescendingKeepsDocumentOrderOnTies() {
         Snippet first = new Snippet("first", 2.0f, true);
         Snippet second = new Snippet("second", 2.0f, true);
@@ -272,7 +263,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testPhraseHighlightsAsSingleSpan() {
-        // A quoted phrase becomes a PhraseQuery; weight-matches mode wraps the whole matched span in one <em>…</em>.
         BytesRefBlock result = highlightSingle(
             config("\"quick brown fox\"", 5, 0, 0),
             new PhraseQuery(CONTENT_FIELD, "quick", "brown", "fox"),
@@ -286,7 +276,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testAdjacentTermsStillWrapIndependently() {
-        // Unquoted adjacent terms are an OR of independent term queries, so each match wraps on its own.
         BytesRefBlock result = highlightSingle(
             config("quick brown fox", 5, 0, 0),
             anyOf(contentTerm("quick"), contentTerm("brown"), contentTerm("fox")),
@@ -331,7 +320,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testFuzzyQueryHighlightsMatch() {
-        // "quikc" is one transposition from "quick".
         BytesRefBlock result = highlightSingle(
             config("quikc~", 5, 0, 0),
             new FuzzyQuery(new Term(CONTENT_FIELD, "quikc"), 1),
@@ -354,7 +342,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testExplicitFuzzyEdits() {
-        // "fux~1" allows one edit, matching "fox".
         BytesRefBlock result = highlightSingle(
             config("fux~1", 5, 0, 0),
             new FuzzyQuery(new Term(CONTENT_FIELD, "fux"), 1),
@@ -397,8 +384,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testBooleanNotExcludes() {
-        // A prohibited term that is present makes the whole query not match the row, so nothing highlights. This pins the
-        // strict boolean semantics that weight-matches mode enforces.
         Query query = booleanQuery(
             new BooleanClause(contentTerm("fox"), BooleanClause.Occur.MUST),
             new BooleanClause(contentTerm("dog"), BooleanClause.Occur.MUST_NOT)
@@ -418,7 +403,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testRequiredOperator() {
-        // "+fox" is required, "cat" is optional; the row matches on the required term alone.
         Query query = booleanQuery(
             new BooleanClause(contentTerm("fox"), BooleanClause.Occur.MUST),
             new BooleanClause(contentTerm("cat"), BooleanClause.Occur.SHOULD)
@@ -442,8 +426,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testFieldQualifiedTermDoesNotHighlight() {
-        // The single ON field is "content" and require_field_match is on, so a term qualified on another field targets
-        // a field that is not indexed and never matches (Query DSL require_field_match: true parity).
         BytesRefBlock result = highlightSingle(config("title:fox", 5, 0, 0), termQuery("title", "fox"), "The fox jumps");
         try {
             assertThat(result.isNull(0), equalTo(true));
@@ -453,8 +435,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testPerFieldTargetingHighlightsOnlyTheTargetedColumn() {
-        // MATCH(title, "fox") targets only the title field: the title column highlights and the body column stays null,
-        // even though "fox" also appears in body. This is the design's §3.1 column-population contract.
         Analyzer analyzer = new StandardAnalyzer();
         Query query = termQuery("title", "fox");
         BytesRefBlock title = bytesRefs(List.of(List.of("the quick fox")));
@@ -471,9 +451,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testCrossFieldConjunctionHighlightsWholeRowOrNothing() {
-        // MATCH(title,"fox") AND MATCH(body,"dog"): row 0 satisfies both clauses, so both columns highlight; row 1 is
-        // missing "dog" in body, so the conjunction fails and NEITHER column highlights (whole-query boolean semantics
-        // under weight-matches, matching Query DSL highlight_query).
         Analyzer analyzer = new StandardAnalyzer();
         Query query = allOf(termQuery("title", "fox"), termQuery("body", "dog"));
         BytesRefBlock title = bytesRefs(List.of(List.of("the fox"), List.of("the fox")));
@@ -492,7 +469,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testRowWithAllNullFieldsYieldsNullEverywhere() {
-        // A row where neither ON field has any value must emit null for every highlight column without building an index.
         Analyzer analyzer = new StandardAnalyzer();
         Query query = anyOf(termQuery("title", "fox"), termQuery("body", "fox"));
         BytesRefBlock title = nulls(1);
@@ -520,7 +496,6 @@ public class HighlightOperatorTests extends OperatorTestCase {
     }
 
     public void testNoMatchSizeWithValidNonMatchingQuery() {
-        // A valid phrase that doesn't match still returns the leading text: no_match_size is independent of weight-matches.
         BytesRefBlock result = highlightSingle(
             config("\"zebra stripes\"", 5, 0, 200),
             new PhraseQuery(CONTENT_FIELD, "zebra", "stripes"),
@@ -600,8 +575,7 @@ public class HighlightOperatorTests extends OperatorTestCase {
         }
     }
 
-    // Runs the operator over one block per ON field (channel f feeds field f) and returns the result page, whose last
-    // fieldNames.size() blocks are the highlight columns in ON order.
+    // Runs the operator with one input block per ON field.
     private Page highlightFields(HighlightConfig config, Query query, List<String> fieldNames, Analyzer analyzer, BytesRefBlock... fields) {
         ExpressionEvaluator[] evaluators = IntStream.range(0, fields.length)
             .mapToObj(HighlightOperatorTests::channelEvaluator)
@@ -680,7 +654,7 @@ public class HighlightOperatorTests extends OperatorTestCase {
         );
     }
 
-    // Returns the input block unchanged, so the operator highlights channel 0 directly.
+    // Returns channel 0 unchanged.
     private static ExpressionEvaluator identityEvaluator() {
         return new ExpressionEvaluator() {
             @Override
@@ -705,7 +679,7 @@ public class HighlightOperatorTests extends OperatorTestCase {
         };
     }
 
-    // Feeds one input channel to one ON field, so multi-field tests can wire block[f] to fieldNames.get(f).
+    // Feeds one input channel to one ON field.
     private static ExpressionEvaluator channelEvaluator(int channel) {
         return new ExpressionEvaluator() {
             @Override

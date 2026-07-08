@@ -51,16 +51,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * Translates a {@code HIGHLIGHT} query {@link Expression} into one Lucene {@link Query} over the real {@code ON} field names.
- * <p>
- * Verification and execution both call this translator so they accept/reject the same query shapes and options.
- * <p>
- * Translation walks the expression tree directly (not {@code asQuery()}) to stay independent from pre-mapping state.
- */
+/** Translates a {@code HIGHLIGHT} query expression into a Lucene {@link Query}. */
 public final class HighlightQueryTranslator {
 
-    // Option names derived from the canonical query-builder ParseFields, keeping HIGHLIGHT in sync with MATCH/MATCH_PHRASE/QSTR.
+    // Keep option names aligned with query-builder ParseFields.
     private static final String BOOST_OPTION = AbstractQueryBuilder.BOOST_FIELD.getPreferredName();
     private static final String OPERATOR_OPTION = MatchQueryBuilder.OPERATOR_FIELD.getPreferredName();
     private static final String FUZZINESS_OPTION = Fuzziness.FIELD.getPreferredName();
@@ -75,7 +69,7 @@ public final class HighlightQueryTranslator {
     private static final Set<String> QUERY_STRING_ALLOWED_OPTIONS = Set.of(DEFAULT_FIELD_OPTION);
     private static final FoldContext FOLD_CONTEXT = FoldContext.small();
 
-    // MATCH options with no meaning in coordinator-side highlighting: reject instead of silently ignoring.
+    // Unsupported MATCH options in this execution path.
     private static final Set<String> MATCH_REJECTED_OPTIONS = Set.of(
         MatchQueryBuilder.FUZZY_REWRITE_FIELD.getPreferredName(),
         MatchQueryBuilder.ZERO_TERMS_QUERY_FIELD.getPreferredName(),
@@ -107,7 +101,7 @@ public final class HighlightQueryTranslator {
         return new HighlightQueryTranslator(fields, defaultAnalyzer).doTranslate(query);
     }
 
-    /** Parses a literal query string over the real {@code ON} field names. */
+    /** Parses a literal query string over the {@code ON} fields. */
     public static Query translateLiteral(String queryText, List<String> fields, Analyzer analyzer) {
         return parseQueryString(queryStringParser(fields, analyzer), queryText);
     }
@@ -138,7 +132,7 @@ public final class HighlightQueryTranslator {
             throw new IllegalArgumentException("HIGHLIGHT does not support [KQL] queries yet");
         }
         if (expr instanceof Literal literal && DataType.isString(literal.dataType())) {
-            // String literal behaves like query_string over all ON fields.
+            // String literals use query_string behavior.
             return translateLiteral(BytesRefs.toString(literal.value()), fields, defaultAnalyzer);
         }
         throw new IllegalArgumentException(
@@ -205,12 +199,7 @@ public final class HighlightQueryTranslator {
         }
     }
 
-    /**
-     * Folds the option {@link MapExpression} into a map of already type-converted values, reusing the owning function's
-     * {@code ALLOWED_OPTIONS} as the single source of truth for option types (via {@link Options#populateMap}). This
-     * yields {@link Float}/{@link Integer}/{@link Boolean}/{@link String} values instead of raw folded expressions, so
-     * downstream readers never perform unchecked casts on unconverted literals.
-     */
+    /** Folds and type-converts option values using {@link Options#populateMap}. */
     private static Map<String, Object> optionMap(Expression options, Source source, Map<String, DataType> allowedOptions) {
         if (options instanceof MapExpression mapExpression) {
             Map<String, Object> converted = new HashMap<>();
@@ -220,7 +209,7 @@ public final class HighlightQueryTranslator {
         return Map.of();
     }
 
-    /** Returns the field key used by both translator and operator for a given ON expression. */
+    /** Returns the field key for an ON expression. */
     private static String fieldName(Expression field) {
         return field instanceof NamedExpression named ? named.name() : Expressions.name(field);
     }
@@ -275,7 +264,7 @@ public final class HighlightQueryTranslator {
 
     private static Query parseQueryString(QueryParser parser, String queryText) {
         if (queryText == null || queryText.isBlank()) {
-            // An empty query string matches nothing.
+            // Empty query strings match nothing.
             return new MatchNoDocsQuery(EMPTY_QUERY_REASON);
         }
         parser.setAllowLeadingWildcard(true);               // ES query_string default (Lucene defaults to false)
@@ -283,21 +272,17 @@ public final class HighlightQueryTranslator {
         try {
             Query query = parser.parse(queryText);
             if (query instanceof BooleanQuery bq && bq.clauses().isEmpty()) {
-                // Analyzer removed all terms (for example, "the" with a stop analyzer).
+                // Analyzer removed all terms.
                 return new MatchNoDocsQuery(NO_TERMS_REASON);
             }
             return query;
         } catch (ParseException | IllegalArgumentException e) {
-            // IllegalArgumentException covers unchecked parser failures (for example, invalid regex/fuzziness).
+            // IllegalArgumentException covers unchecked parser failures.
             throw new IllegalArgumentException("Invalid query [" + queryText + "] in HIGHLIGHT: " + e.getMessage(), e);
         }
     }
 
-    /**
-     * Lucene exposes two distinct query-string parsers: {@link QueryParser} targets a single field, while
-     * {@link MultiFieldQueryParser} spreads each term across several fields and always wraps the result in a
-     * {@link BooleanQuery}. They are not interchangeable for a single field, so pick the one matching the ON-field arity.
-     */
+    /** Uses the parser that matches the number of ON fields. */
     private static QueryParser queryStringParser(List<String> fields, Analyzer analyzer) {
         return switch (fields.size()) {
             case 1 -> new HighlightSingleFieldParser(fields.getFirst(), analyzer);
@@ -305,7 +290,7 @@ public final class HighlightQueryTranslator {
         };
     }
 
-    // Match query_string semantics: bare "~" => AUTO, "~N" => validated numeric edit distance.
+    // Match query_string fuzzy-distance semantics.
     private static float queryStringFuzzyDistance(Token fuzzyToken, String termStr) {
         if (fuzzyToken.image.length() == 1) {
             return Fuzziness.AUTO.asDistance(termStr);
@@ -335,7 +320,7 @@ public final class HighlightQueryTranslator {
         }
     }
 
-    /** QueryBuilder variant that emits Lucene {@link FuzzyQuery} without requiring a search execution context. */
+    /** QueryBuilder variant that emits Lucene {@link FuzzyQuery}. */
     private static final class FuzzyQueryBuilder extends org.apache.lucene.util.QueryBuilder {
         private final Fuzziness fuzziness;
         private final int prefixLength;

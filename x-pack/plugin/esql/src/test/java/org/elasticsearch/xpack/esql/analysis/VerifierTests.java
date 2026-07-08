@@ -4599,26 +4599,21 @@ public class VerifierTests extends ESTestCase {
 
     public void testHighlightRejectsUnbalancedQuote() {
         assumeTrue("requires HIGHLIGHT_V4 capability", EsqlCapabilities.Cap.HIGHLIGHT_V4.isEnabled());
-        // The query literal is a lone double-quote followed by "fox", which the query_string parser cannot parse.
         defaultAnalyzer().error("FROM test | HIGHLIGHT \"\\\"fox\" ON first_name", containsString("Invalid query [\"fox] in HIGHLIGHT:"));
     }
 
     public void testHighlightRejectsInvalidFuzziness() {
         assumeTrue("requires HIGHLIGHT_V4 capability", EsqlCapabilities.Cap.HIGHLIGHT_V4.isEnabled());
-        // A fractional fuzziness is raised as an unchecked IllegalArgumentException during parsing and must still be caught.
         defaultAnalyzer().error("FROM test | HIGHLIGHT \"fox~0.5\" ON first_name", containsString("Invalid query [fox~0.5] in HIGHLIGHT:"));
     }
 
     public void testHighlightAcceptsQuerySyntax() {
         assumeTrue("requires HIGHLIGHT_V4 capability", EsqlCapabilities.Cap.HIGHLIGHT_V4.isEnabled());
-        // A phrase, a grouped boolean of a prefix and a fuzzy term, and a regex all parse without error.
         defaultAnalyzer().query("FROM test | HIGHLIGHT \"\\\"quick fox\\\" OR (ca* AND jump~) OR /f[ao]x/\" ON first_name");
     }
 
     public void testHighlightRejectsNonStringOnFieldWithoutOptions() {
         assumeTrue("requires HIGHLIGHT_V4 capability", EsqlCapabilities.Cap.HIGHLIGHT_V4.isEnabled());
-        // No WITH block: pins that the ON field-type check runs before the `options == null` short-circuit, so these
-        // fail fast at analysis (a clean 400) instead of inside HighlightOperator (a 500).
         defaultAnalyzer().error(
             "FROM test | HIGHLIGHT \"x\" ON salary",
             containsString("HIGHLIGHT ON field [salary] must be [text] or [keyword], found [integer]")
@@ -4643,8 +4638,6 @@ public class VerifierTests extends ESTestCase {
 
     public void testHighlightAcceptsFullTextExpressions() {
         assumeTrue("requires HIGHLIGHT_V4 capability", EsqlCapabilities.Cap.HIGHLIGHT_V4.isEnabled());
-        // MATCH, MATCH_PHRASE, QSTR, the ':' operator, and AND/OR/NOT combinations all verify clean; a full-text
-        // function in HIGHLIGHT no longer trips "only supported in WHERE and STATS commands...".
         fullText().query("FROM test | HIGHLIGHT MATCH(title, \"fox\") ON title");
         fullText().query("FROM test | HIGHLIGHT MATCH_PHRASE(title, \"quick fox\") ON title");
         fullText().query("FROM test | HIGHLIGHT QSTR(\"title: fox\") ON title");
@@ -4656,8 +4649,6 @@ public class VerifierTests extends ESTestCase {
 
     public void testHighlightExpressionAfterLimitIsAllowed() {
         assumeTrue("requires HIGHLIGHT_V4 capability", EsqlCapabilities.Cap.HIGHLIGHT_V4.isEnabled());
-        // Post-TopN highlighting is the recommended usage; the "cannot be used after LIMIT/STATS" walk must not apply
-        // to a HIGHLIGHT query.
         fullText().query("FROM test | SORT id | LIMIT 5 | HIGHLIGHT MATCH(title, \"fox\") ON title");
     }
 
@@ -4695,8 +4686,6 @@ public class VerifierTests extends ESTestCase {
 
     public void testHighlightExpressionAfterStatsFailsFieldResolution() {
         assumeTrue("requires HIGHLIGHT_V4 capability", EsqlCapabilities.Cap.HIGHLIGHT_V4.isEnabled());
-        // After STATS drops the columns, the field references in the HIGHLIGHT expression fail the standard
-        // unknown-column check (unchanged mechanism).
         fullText().error(
             "FROM test | STATS c = COUNT(*) | HIGHLIGHT MATCH(title, \"fox\") ON title",
             containsString("Unknown column [title]")
@@ -4710,7 +4699,7 @@ public class VerifierTests extends ESTestCase {
         );
     }
 
-    // optionValue is inserted verbatim: numbers are bare, strings include quotes.
+    // optionValue is inserted directly: numbers are bare, strings include quotes.
     private void assertInvalidHighlightOptionValue(String optionName, String optionValue, Matcher<String> messageMatcher) {
         defaultAnalyzer().error(
             "FROM test | HIGHLIGHT \"search\" ON first_name WITH { \"" + optionName + "\": " + optionValue + " }",
