@@ -24,13 +24,20 @@ import org.elasticsearch.common.lucene.BytesRefs;
 import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.common.unit.Fuzziness;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.index.query.AbstractQueryBuilder;
+import org.elasticsearch.index.query.MatchPhraseQueryBuilder;
+import org.elasticsearch.index.query.MatchQueryBuilder;
+import org.elasticsearch.index.query.QueryStringQueryBuilder;
 import org.elasticsearch.xpack.esql.core.expression.Expression;
 import org.elasticsearch.xpack.esql.core.expression.Expressions;
 import org.elasticsearch.xpack.esql.core.expression.FoldContext;
 import org.elasticsearch.xpack.esql.core.expression.Literal;
 import org.elasticsearch.xpack.esql.core.expression.MapExpression;
 import org.elasticsearch.xpack.esql.core.expression.NamedExpression;
+import org.elasticsearch.xpack.esql.core.expression.TypeResolutions;
+import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
+import org.elasticsearch.xpack.esql.expression.function.Options;
 import org.elasticsearch.xpack.esql.expression.function.fulltext.Kql;
 import org.elasticsearch.xpack.esql.expression.function.fulltext.Match;
 import org.elasticsearch.xpack.esql.expression.function.fulltext.MatchPhrase;
@@ -39,6 +46,7 @@ import org.elasticsearch.xpack.esql.expression.predicate.logical.And;
 import org.elasticsearch.xpack.esql.expression.predicate.logical.Not;
 import org.elasticsearch.xpack.esql.expression.predicate.logical.Or;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -52,16 +60,16 @@ import java.util.Set;
  */
 public final class HighlightQueryTranslator {
 
-    // Option names mirrored from MATCH/MATCH_PHRASE/QSTR.
-    private static final String BOOST_OPTION = "boost";
-    private static final String OPERATOR_OPTION = "operator";
-    private static final String FUZZINESS_OPTION = "fuzziness";
-    private static final String PREFIX_LENGTH_OPTION = "prefix_length";
-    private static final String MAX_EXPANSIONS_OPTION = "max_expansions";
-    private static final String FUZZY_TRANSPOSITIONS_OPTION = "fuzzy_transpositions";
-    private static final String MINIMUM_SHOULD_MATCH_OPTION = "minimum_should_match";
-    private static final String SLOP_OPTION = "slop";
-    private static final String DEFAULT_FIELD_OPTION = "default_field";
+    // Option names derived from the canonical query-builder ParseFields, keeping HIGHLIGHT in sync with MATCH/MATCH_PHRASE/QSTR.
+    private static final String BOOST_OPTION = AbstractQueryBuilder.BOOST_FIELD.getPreferredName();
+    private static final String OPERATOR_OPTION = MatchQueryBuilder.OPERATOR_FIELD.getPreferredName();
+    private static final String FUZZINESS_OPTION = Fuzziness.FIELD.getPreferredName();
+    private static final String PREFIX_LENGTH_OPTION = MatchQueryBuilder.PREFIX_LENGTH_FIELD.getPreferredName();
+    private static final String MAX_EXPANSIONS_OPTION = MatchQueryBuilder.MAX_EXPANSIONS_FIELD.getPreferredName();
+    private static final String FUZZY_TRANSPOSITIONS_OPTION = MatchQueryBuilder.FUZZY_TRANSPOSITIONS_FIELD.getPreferredName();
+    private static final String MINIMUM_SHOULD_MATCH_OPTION = MatchQueryBuilder.MINIMUM_SHOULD_MATCH_FIELD.getPreferredName();
+    private static final String SLOP_OPTION = MatchPhraseQueryBuilder.SLOP_FIELD.getPreferredName();
+    private static final String DEFAULT_FIELD_OPTION = QueryStringQueryBuilder.DEFAULT_FIELD_FIELD.getPreferredName();
     private static final String EMPTY_QUERY_REASON = "HIGHLIGHT query is empty";
     private static final String NO_TERMS_REASON = "HIGHLIGHT query produced no terms";
     private static final Set<String> QUERY_STRING_ALLOWED_OPTIONS = Set.of(DEFAULT_FIELD_OPTION);
@@ -69,12 +77,14 @@ public final class HighlightQueryTranslator {
 
     // MATCH options with no meaning in coordinator-side highlighting: reject instead of silently ignoring.
     private static final Set<String> MATCH_REJECTED_OPTIONS = Set.of(
-        "fuzzy_rewrite",
-        "zero_terms_query",
-        "auto_generate_synonyms_phrase_query",
-        "lenient"
+        MatchQueryBuilder.FUZZY_REWRITE_FIELD.getPreferredName(),
+        MatchQueryBuilder.ZERO_TERMS_QUERY_FIELD.getPreferredName(),
+        MatchQueryBuilder.GENERATE_SYNONYMS_PHRASE_QUERY.getPreferredName(),
+        MatchQueryBuilder.LENIENT_FIELD.getPreferredName()
     );
-    private static final Set<String> MATCH_PHRASE_REJECTED_OPTIONS = Set.of("zero_terms_query");
+    private static final Set<String> MATCH_PHRASE_REJECTED_OPTIONS = Set.of(
+        MatchPhraseQueryBuilder.ZERO_TERMS_QUERY_FIELD.getPreferredName()
+    );
 
     private final List<String> fields;
     private final Analyzer defaultAnalyzer;
@@ -143,7 +153,7 @@ public final class HighlightQueryTranslator {
     }
 
     private Query translateMatch(Match match) {
-        Map<String, Expression> options = optionMap(match.options());
+        Map<String, Object> options = optionMap(match.options(), match.source(), Match.ALLOWED_OPTIONS);
         rejectOptions(options, MATCH_REJECTED_OPTIONS, "MATCH");
         String field = fieldName(match.field());
         String text = queryText(match.query());
@@ -154,7 +164,7 @@ public final class HighlightQueryTranslator {
     }
 
     private Query translateMatchPhrase(MatchPhrase matchPhrase) {
-        Map<String, Expression> options = optionMap(matchPhrase.options());
+        Map<String, Object> options = optionMap(matchPhrase.options(), matchPhrase.source(), MatchPhrase.ALLOWED_OPTIONS);
         rejectOptions(options, MATCH_PHRASE_REJECTED_OPTIONS, "MATCH_PHRASE");
         String field = fieldName(matchPhrase.field());
         String text = queryText(matchPhrase.query());
@@ -166,7 +176,7 @@ public final class HighlightQueryTranslator {
     }
 
     private Query translateQueryString(QueryString queryString) {
-        Map<String, Expression> options = optionMap(queryString.options());
+        Map<String, Object> options = optionMap(queryString.options(), queryString.source(), QueryString.ALLOWED_OPTIONS);
         rejectUnsupportedOptions(options, QUERY_STRING_ALLOWED_OPTIONS, "QSTR");
         String text = queryText(queryString.query());
         String defaultField = stringOption(options, DEFAULT_FIELD_OPTION);
@@ -174,12 +184,12 @@ public final class HighlightQueryTranslator {
         return translateLiteral(text, targetFields, defaultAnalyzer);
     }
 
-    private static Query applyBoost(Query query, Map<String, Expression> options) {
+    private static Query applyBoost(Query query, Map<String, Object> options) {
         Float boost = floatOption(options, BOOST_OPTION);
         return boost == null ? query : new BoostQuery(query, boost);
     }
 
-    private static void rejectOptions(Map<String, Expression> options, Set<String> rejected, String functionName) {
+    private static void rejectOptions(Map<String, Object> options, Set<String> rejected, String functionName) {
         for (String name : rejected) {
             if (options.containsKey(name)) {
                 throw new IllegalArgumentException("HIGHLIGHT does not support the [" + name + "] option of [" + functionName + "]");
@@ -187,7 +197,7 @@ public final class HighlightQueryTranslator {
         }
     }
 
-    private static void rejectUnsupportedOptions(Map<String, Expression> options, Set<String> supported, String functionName) {
+    private static void rejectUnsupportedOptions(Map<String, Object> options, Set<String> supported, String functionName) {
         for (String name : options.keySet()) {
             if (supported.contains(name) == false) {
                 throw new IllegalArgumentException("HIGHLIGHT does not support the [" + name + "] option of [" + functionName + "]");
@@ -195,8 +205,19 @@ public final class HighlightQueryTranslator {
         }
     }
 
-    private static Map<String, Expression> optionMap(Expression options) {
-        return options instanceof MapExpression mapExpression ? mapExpression.keyFoldedMap() : Map.of();
+    /**
+     * Folds the option {@link MapExpression} into a map of already type-converted values, reusing the owning function's
+     * {@code ALLOWED_OPTIONS} as the single source of truth for option types (via {@link Options#populateMap}). This
+     * yields {@link Float}/{@link Integer}/{@link Boolean}/{@link String} values instead of raw folded expressions, so
+     * downstream readers never perform unchecked casts on unconverted literals.
+     */
+    private static Map<String, Object> optionMap(Expression options, Source source, Map<String, DataType> allowedOptions) {
+        if (options instanceof MapExpression mapExpression) {
+            Map<String, Object> converted = new HashMap<>();
+            Options.populateMap(mapExpression, converted, source, TypeResolutions.ParamOrdinal.SECOND, allowedOptions);
+            return converted;
+        }
+        return Map.of();
     }
 
     /** Returns the field key used by both translator and operator for a given ON expression. */
@@ -209,37 +230,36 @@ public final class HighlightQueryTranslator {
     }
 
     @Nullable
-    private static String stringOption(Map<String, Expression> options, String name) {
-        Expression value = options.get(name);
-        return value == null ? null : BytesRefs.toString(value.fold(FOLD_CONTEXT));
+    private static String stringOption(Map<String, Object> options, String name) {
+        Object value = options.get(name);
+        return value == null ? null : value.toString();
     }
 
     @Nullable
-    private static Float floatOption(Map<String, Expression> options, String name) {
-        Expression value = options.get(name);
-        return value == null ? null : ((Number) value.fold(FOLD_CONTEXT)).floatValue();
+    private static Float floatOption(Map<String, Object> options, String name) {
+        return (Float) options.get(name);
     }
 
-    private static int intOption(Map<String, Expression> options, String name, int defaultValue) {
-        Expression value = options.get(name);
-        return value == null ? defaultValue : ((Number) value.fold(FOLD_CONTEXT)).intValue();
+    private static int intOption(Map<String, Object> options, String name, int defaultValue) {
+        Object value = options.get(name);
+        return value == null ? defaultValue : (Integer) value;
     }
 
-    private static boolean boolOption(Map<String, Expression> options, String name, boolean defaultValue) {
-        Expression value = options.get(name);
-        return value == null ? defaultValue : (Boolean) value.fold(FOLD_CONTEXT);
+    private static boolean boolOption(Map<String, Object> options, String name, boolean defaultValue) {
+        Object value = options.get(name);
+        return value == null ? defaultValue : (Boolean) value;
     }
 
     private static Query matchNoTermsAsNoDocs(@Nullable Query query, String reason) {
         return query == null ? new MatchNoDocsQuery(reason) : query;
     }
 
-    private static BooleanClause.Occur matchOperator(Map<String, Expression> options) {
+    private static BooleanClause.Occur matchOperator(Map<String, Object> options) {
         String operator = stringOption(options, OPERATOR_OPTION);
         return "AND".equalsIgnoreCase(operator) ? BooleanClause.Occur.MUST : BooleanClause.Occur.SHOULD;
     }
 
-    private static org.apache.lucene.util.QueryBuilder createMatchQueryBuilder(Map<String, Expression> options, Analyzer analyzer) {
+    private static org.apache.lucene.util.QueryBuilder createMatchQueryBuilder(Map<String, Object> options, Analyzer analyzer) {
         String fuzzinessValue = stringOption(options, FUZZINESS_OPTION);
         if (fuzzinessValue == null) {
             return new org.apache.lucene.util.QueryBuilder(analyzer);
@@ -255,7 +275,7 @@ public final class HighlightQueryTranslator {
 
     private static Query parseQueryString(QueryParser parser, String queryText) {
         if (queryText == null || queryText.isBlank()) {
-            // Preserve existing empty-query behavior.
+            // An empty query string matches nothing.
             return new MatchNoDocsQuery(EMPTY_QUERY_REASON);
         }
         parser.setAllowLeadingWildcard(true);               // ES query_string default (Lucene defaults to false)
@@ -273,9 +293,14 @@ public final class HighlightQueryTranslator {
         }
     }
 
+    /**
+     * Lucene exposes two distinct query-string parsers: {@link QueryParser} targets a single field, while
+     * {@link MultiFieldQueryParser} spreads each term across several fields and always wraps the result in a
+     * {@link BooleanQuery}. They are not interchangeable for a single field, so pick the one matching the ON-field arity.
+     */
     private static QueryParser queryStringParser(List<String> fields, Analyzer analyzer) {
         return switch (fields.size()) {
-            case 1 -> new HighlightClassicParser(fields.getFirst(), analyzer);
+            case 1 -> new HighlightSingleFieldParser(fields.getFirst(), analyzer);
             default -> new HighlightMultiFieldParser(fields.toArray(String[]::new), analyzer);
         };
     }
@@ -288,9 +313,9 @@ public final class HighlightQueryTranslator {
         return Fuzziness.fromString(fuzzyToken.image.substring(1)).asDistance(termStr);
     }
 
-    private static final class HighlightMultiFieldParser extends MultiFieldQueryParser {
-        HighlightMultiFieldParser(String[] fields, Analyzer analyzer) {
-            super(fields, analyzer);
+    private static final class HighlightSingleFieldParser extends QueryParser {
+        HighlightSingleFieldParser(String field, Analyzer analyzer) {
+            super(field, analyzer);
         }
 
         @Override
@@ -299,9 +324,9 @@ public final class HighlightQueryTranslator {
         }
     }
 
-    private static final class HighlightClassicParser extends QueryParser {
-        HighlightClassicParser(String field, Analyzer analyzer) {
-            super(field, analyzer);
+    private static final class HighlightMultiFieldParser extends MultiFieldQueryParser {
+        HighlightMultiFieldParser(String[] fields, Analyzer analyzer) {
+            super(fields, analyzer);
         }
 
         @Override
