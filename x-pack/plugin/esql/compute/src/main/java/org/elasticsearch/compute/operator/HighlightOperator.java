@@ -26,6 +26,7 @@ import org.elasticsearch.compute.data.BlockFactory;
 import org.elasticsearch.compute.data.BytesRefBlock;
 import org.elasticsearch.compute.data.Page;
 import org.elasticsearch.compute.expression.ExpressionEvaluator;
+import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.Releasables;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.analysis.NamedAnalyzer;
@@ -151,40 +152,42 @@ public class HighlightOperator extends AbstractPageMappingOperator {
     protected Page process(Page page) {
         int rowCount = page.getPositionCount();
         int fieldCount = fieldEvaluators.length;
-        BytesRefBlock[] fieldValues = new BytesRefBlock[fieldCount];
-        BytesRefBlock.Builder[] builders = new BytesRefBlock.Builder[fieldCount];
+        HighlightField[] fields = new HighlightField[fieldCount];
         Block[] highlightedBlocks = new Block[fieldCount];
         // Reuse scratch holder for bytes extraction.
         BytesRef scratch = new BytesRef();
-        // Reuse per row: joined text for each ON field.
-        String[] rowText = new String[fieldCount];
         boolean success = false;
         try {
-            fillFieldValues(page, fieldValues);
-            initBuilders(rowCount, builders);
+            initFields(page, rowCount, fields);
             for (int row = 0; row < rowCount; row++) {
-                highlightRow(row, fieldValues, builders, rowText, scratch);
+                highlightRow(row, fields, scratch);
             }
-            buildHighlightedBlocks(builders, highlightedBlocks);
+            buildHighlightedBlocks(fields, highlightedBlocks);
             Page result = page.appendBlocks(highlightedBlocks);
             success = true;
             return result;
         } finally {
             // Release temporary blocks/builders; release built result blocks only on failure.
-            Releasables.closeExpectNoException(fieldValues);
-            Releasables.closeExpectNoException(builders);
+            Releasables.closeExpectNoException(fields);
             if (success == false) {
                 Releasables.closeExpectNoException(highlightedBlocks);
             }
         }
     }
 
-    private void fillFieldValues(Page page, BytesRefBlock[] fieldValues) {
+    private void initFields(Page page, int rowCount, HighlightField[] fields) {
         for (int field = 0; field < fieldEvaluators.length; field++) {
             Block block = fieldEvaluators[field].eval(page);
             if (block instanceof BytesRefBlock b) {
-                fieldValues[field] = b;
-                continue;
+                BytesRefBlock.Builder builder = null;
+                try {
+                    builder = blockFactory.newBytesRefBlockBuilder(rowCount);
+                    fields[field] = new HighlightField(fieldNames.get(field), b, builder);
+                    continue;
+                } catch (RuntimeException e) {
+                    Releasables.closeExpectNoException(b, builder);
+                    throw e;
+                }
             }
             block.close();
             throw new IllegalArgumentException(
@@ -193,58 +196,73 @@ public class HighlightOperator extends AbstractPageMappingOperator {
         }
     }
 
-    private void initBuilders(int rowCount, BytesRefBlock.Builder[] builders) {
-        for (int field = 0; field < builders.length; field++) {
-            builders[field] = blockFactory.newBytesRefBlockBuilder(rowCount);
-        }
-    }
-
-    private static void buildHighlightedBlocks(BytesRefBlock.Builder[] builders, Block[] highlightedBlocks) {
+    private static void buildHighlightedBlocks(HighlightField[] fields, Block[] highlightedBlocks) {
         for (int field = 0; field < highlightedBlocks.length; field++) {
-            highlightedBlocks[field] = builders[field].build();
+            highlightedBlocks[field] = fields[field].builder.build();
         }
     }
 
     /** Highlights one row across all ON fields. */
-    private void highlightRow(int row, BytesRefBlock[] fieldValues, BytesRefBlock.Builder[] builders, String[] rowText, BytesRef scratch) {
+    private void highlightRow(int row, HighlightField[] fields, BytesRef scratch) {
         boolean hasRowValues = false;
-        for (int f = 0; f < fieldValues.length; f++) {
-            int valueCount = fieldValues[f].getValueCount(row);
-            rowText[f] = valueCount == 0 ? null : joinValues(fieldValues[f], row, valueCount, scratch);
-            hasRowValues |= rowText[f] != null;
+        for (HighlightField field : fields) {
+            field.loadRowText(row, scratch);
+            hasRowValues |= field.rowText != null;
         }
         if (hasRowValues == false) {
-            appendNulls(builders);
+            appendNulls(fields);
             return;
         }
-        IndexSearcher searcher = createRowSearcher(rowText);
-        for (int f = 0; f < builders.length; f++) {
-            if (rowText[f] == null) {
-                builders[f].appendNull();
+        IndexSearcher searcher = createRowSearcher(fields);
+        for (HighlightField field : fields) {
+            if (field.rowText == null) {
+                field.builder.appendNull();
                 continue;
             }
             try {
-                appendSnippets(builders[f], highlight(searcher, fieldNames.get(f), rowText[f]));
+                appendSnippets(field.builder, highlight(searcher, field.name, field.rowText));
             } catch (IOException e) {
                 throw new IllegalStateException("HIGHLIGHT failed to highlight field", e);
             }
         }
     }
 
-    private IndexSearcher createRowSearcher(String[] rowText) {
+    private IndexSearcher createRowSearcher(HighlightField[] fields) {
         MemoryIndex memoryIndex = new MemoryIndex(true);
-        for (int f = 0; f < rowText.length; f++) {
-            String text = rowText[f];
-            if (text != null) {
-                memoryIndex.addField(fieldNames.get(f), text, memoryIndexAnalyzer);
+        for (HighlightField field : fields) {
+            if (field.rowText != null) {
+                memoryIndex.addField(field.name, field.rowText, memoryIndexAnalyzer);
             }
         }
         return memoryIndex.createSearcher();
     }
 
-    private static void appendNulls(BytesRefBlock.Builder[] builders) {
-        for (BytesRefBlock.Builder builder : builders) {
-            builder.appendNull();
+    private static void appendNulls(HighlightField[] fields) {
+        for (HighlightField field : fields) {
+            field.builder.appendNull();
+        }
+    }
+
+    private static final class HighlightField implements Releasable {
+        private final String name;
+        private final BytesRefBlock values;
+        private final BytesRefBlock.Builder builder;
+        private String rowText;
+
+        private HighlightField(String name, BytesRefBlock values, BytesRefBlock.Builder builder) {
+            this.name = name;
+            this.values = values;
+            this.builder = builder;
+        }
+
+        private void loadRowText(int row, BytesRef scratch) {
+            int valueCount = values.getValueCount(row);
+            rowText = valueCount == 0 ? null : joinValues(values, row, valueCount, scratch);
+        }
+
+        @Override
+        public void close() {
+            Releasables.close(values, builder);
         }
     }
 

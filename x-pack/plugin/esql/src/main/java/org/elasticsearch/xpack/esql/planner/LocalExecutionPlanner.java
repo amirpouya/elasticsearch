@@ -43,7 +43,6 @@ import org.elasticsearch.compute.operator.FilterOperator.FilterOperatorFactory;
 import org.elasticsearch.compute.operator.GroupedLimitOperator;
 import org.elasticsearch.compute.operator.HighlightConfig;
 import org.elasticsearch.compute.operator.HighlightOperator;
-import org.elasticsearch.compute.operator.HighlightQueryParser;
 import org.elasticsearch.compute.operator.LimitOperator;
 import org.elasticsearch.compute.operator.LocalSourceOperator;
 import org.elasticsearch.compute.operator.LocalSourceOperator.LocalSourceFactory;
@@ -1335,7 +1334,7 @@ public class LocalExecutionPlanner {
         org.apache.lucene.search.Query query;
         if (literal != null) {
             queryText = literal;
-            query = HighlightQueryParser.parse(fieldNames, literal, analyzer);
+            query = HighlightQueryTranslator.translateLiteral(literal, fieldNames, analyzer);
         } else {
             queryText = queryExpr.sourceText();
             query = HighlightQueryTranslator.translate(queryExpr, fieldNames, analyzer);

@@ -7,9 +7,7 @@
 lexer grammar Highlight;
 
 //
-// HIGHLIGHT [prefix = "..."] query [ON field, ...] [WITH options]
+// HIGHLIGHT command
 //
-// The query region and the ON fields are lexed in the shared EXPRESSION_MODE (like WHERE/RERANK) so the query can be a
-// full-text function expression (MATCH(...), QSTR(...), boolean combinations, the ':' operator) and not just a literal.
-// EXPRESSION_MODE already provides ON, WITH, commas, parentheses and function-call lexing, so no dedicated mode is needed.
+// HIGHLIGHT uses EXPRESSION_MODE so the query can be a string literal or a full-text expression.
 DEV_HIGHLIGHT : {this.isDevVersion()}? 'highlight' -> pushMode(EXPRESSION_MODE);

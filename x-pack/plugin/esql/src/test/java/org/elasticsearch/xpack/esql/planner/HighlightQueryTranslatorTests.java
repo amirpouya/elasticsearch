@@ -7,6 +7,7 @@
 
 package org.elasticsearch.xpack.esql.planner;
 
+import org.apache.lucene.analysis.en.EnglishAnalyzer;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause;
@@ -14,9 +15,13 @@ import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.BoostQuery;
 import org.apache.lucene.search.FuzzyQuery;
 import org.apache.lucene.search.MatchAllDocsQuery;
+import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.PhraseQuery;
+import org.apache.lucene.search.PrefixQuery;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.RegexpQuery;
 import org.apache.lucene.search.TermQuery;
+import org.apache.lucene.search.WildcardQuery;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xpack.esql.core.expression.Expression;
 import org.elasticsearch.xpack.esql.core.expression.MapExpression;
@@ -41,6 +46,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.startsWith;
 
 /**
  * Unit tests for {@link HighlightQueryTranslator}, asserting the shape of the Lucene {@link Query} produced for each
@@ -55,6 +61,10 @@ public class HighlightQueryTranslatorTests extends ESTestCase {
 
     private static Query translate(Expression query, List<String> fields) {
         return HighlightQueryTranslator.translate(query, fields, new StandardAnalyzer());
+    }
+
+    private static Query translateLiteral(String text) {
+        return HighlightQueryTranslator.translateLiteral(text, TITLE, new StandardAnalyzer());
     }
 
     private static Match match(String field, String text, MapExpression options) {
@@ -75,6 +85,75 @@ public class HighlightQueryTranslatorTests extends ESTestCase {
             entries.add(of(keyValue));
         }
         return new MapExpression(EMPTY, entries);
+    }
+
+    public void testLiteralDisjunctionOfTerms() {
+        BooleanQuery bq = asInstanceOf(BooleanQuery.class, translateLiteral("foo bar"));
+        assertThat(bq.clauses(), hasSize(2));
+        for (BooleanClause clause : bq.clauses()) {
+            assertThat(clause.occur(), equalTo(BooleanClause.Occur.SHOULD));
+            assertThat(clause.query(), instanceOf(TermQuery.class));
+        }
+    }
+
+    public void testLiteralBlankInputIsMatchNoDocs() {
+        assertThat(translateLiteral(""), instanceOf(MatchNoDocsQuery.class));
+        assertThat(translateLiteral("   "), instanceOf(MatchNoDocsQuery.class));
+        assertThat(HighlightQueryTranslator.translateLiteral(null, TITLE, new StandardAnalyzer()), instanceOf(MatchNoDocsQuery.class));
+    }
+
+    public void testLiteralAllTermsFilteredIsMatchNoDocs() {
+        // "the" is a stop word, so the parsed query has no clauses and is normalized to MatchNoDocsQuery.
+        Query query = HighlightQueryTranslator.translateLiteral("the", TITLE, new StandardAnalyzer(EnglishAnalyzer.ENGLISH_STOP_WORDS_SET));
+        assertThat(query, instanceOf(MatchNoDocsQuery.class));
+    }
+
+    public void testLiteralQuotedPhrase() {
+        assertThat(translateLiteral("\"a b\""), instanceOf(PhraseQuery.class));
+    }
+
+    public void testLiteralPrefix() {
+        assertThat(translateLiteral("fo*"), instanceOf(PrefixQuery.class));
+    }
+
+    public void testLiteralWildcard() {
+        assertThat(translateLiteral("f?x"), instanceOf(WildcardQuery.class));
+    }
+
+    public void testLiteralLeadingWildcardAllowed() {
+        assertThat(translateLiteral("*ox"), instanceOf(WildcardQuery.class));
+    }
+
+    public void testLiteralBareFuzzyUsesAutoDistance() {
+        // AUTO fuzziness gives a term of length 3-5 a single edit.
+        FuzzyQuery query = asInstanceOf(FuzzyQuery.class, translateLiteral("quick~"));
+        assertThat(query.getMaxEdits(), equalTo(1));
+    }
+
+    public void testLiteralShortBareFuzzyIsZeroEdits() {
+        // AUTO fuzziness gives a term of length <= 2 zero edits.
+        FuzzyQuery query = asInstanceOf(FuzzyQuery.class, translateLiteral("fx~"));
+        assertThat(query.getMaxEdits(), equalTo(0));
+    }
+
+    public void testLiteralExplicitFuzzyDistance() {
+        FuzzyQuery query = asInstanceOf(FuzzyQuery.class, translateLiteral("fox~2"));
+        assertThat(query.getMaxEdits(), equalTo(2));
+    }
+
+    public void testLiteralRegex() {
+        assertThat(translateLiteral("/f[ao]x/"), instanceOf(RegexpQuery.class));
+    }
+
+    public void testLiteralSyntaxErrorThrows() {
+        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> translateLiteral("fox AND"));
+        assertThat(e.getMessage(), startsWith("Invalid query [fox AND] in HIGHLIGHT:"));
+    }
+
+    public void testLiteralInvalidFuzzinessThrows() {
+        // Fuzziness rejects a fractional edit distance, surfaced as an IllegalArgumentException during parsing.
+        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> translateLiteral("fox~0.5"));
+        assertThat(e.getMessage(), startsWith("Invalid query [fox~0.5] in HIGHLIGHT:"));
     }
 
     public void testMatchSingleTerm() {

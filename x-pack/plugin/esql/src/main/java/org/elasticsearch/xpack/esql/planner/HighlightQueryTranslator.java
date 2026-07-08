@@ -9,6 +9,10 @@ package org.elasticsearch.xpack.esql.planner;
 
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.index.Term;
+import org.apache.lucene.queryparser.classic.MultiFieldQueryParser;
+import org.apache.lucene.queryparser.classic.ParseException;
+import org.apache.lucene.queryparser.classic.QueryParser;
+import org.apache.lucene.queryparser.classic.Token;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.BoostQuery;
@@ -19,7 +23,6 @@ import org.apache.lucene.search.Query;
 import org.elasticsearch.common.lucene.BytesRefs;
 import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.common.unit.Fuzziness;
-import org.elasticsearch.compute.operator.HighlightQueryParser;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.xpack.esql.core.expression.Expression;
 import org.elasticsearch.xpack.esql.core.expression.Expressions;
@@ -59,6 +62,8 @@ public final class HighlightQueryTranslator {
     private static final String MINIMUM_SHOULD_MATCH_OPTION = "minimum_should_match";
     private static final String SLOP_OPTION = "slop";
     private static final String DEFAULT_FIELD_OPTION = "default_field";
+    private static final String EMPTY_QUERY_REASON = "HIGHLIGHT query is empty";
+    private static final String NO_TERMS_REASON = "HIGHLIGHT query produced no terms";
     private static final Set<String> QUERY_STRING_ALLOWED_OPTIONS = Set.of(DEFAULT_FIELD_OPTION);
     private static final FoldContext FOLD_CONTEXT = FoldContext.small();
 
@@ -92,6 +97,11 @@ public final class HighlightQueryTranslator {
         return new HighlightQueryTranslator(fields, defaultAnalyzer).doTranslate(query);
     }
 
+    /** Parses a literal query string over the real {@code ON} field names. */
+    public static Query translateLiteral(String queryText, List<String> fields, Analyzer analyzer) {
+        return parseQueryString(queryStringParser(fields, analyzer), queryText);
+    }
+
     private Query doTranslate(Expression expr) {
         // MatchOperator (':') extends Match, so Match handles both.
         if (expr instanceof Match match) {
@@ -119,7 +129,7 @@ public final class HighlightQueryTranslator {
         }
         if (expr instanceof Literal literal && DataType.isString(literal.dataType())) {
             // String literal behaves like query_string over all ON fields.
-            return HighlightQueryParser.parse(fields, BytesRefs.toString(literal.value()), defaultAnalyzer);
+            return translateLiteral(BytesRefs.toString(literal.value()), fields, defaultAnalyzer);
         }
         throw new IllegalArgumentException(
             "HIGHLIGHT query must be a full-text function (MATCH, MATCH_PHRASE, QSTR) or a boolean combination of them, found ["
@@ -161,7 +171,7 @@ public final class HighlightQueryTranslator {
         String text = queryText(queryString.query());
         String defaultField = stringOption(options, DEFAULT_FIELD_OPTION);
         List<String> targetFields = defaultField != null ? List.of(defaultField) : fields;
-        return HighlightQueryParser.parse(targetFields, text, defaultAnalyzer);
+        return translateLiteral(text, targetFields, defaultAnalyzer);
     }
 
     private static Query applyBoost(Query query, Map<String, Expression> options) {
@@ -241,6 +251,63 @@ public final class HighlightQueryTranslator {
             intOption(options, MAX_EXPANSIONS_OPTION, FuzzyQuery.defaultMaxExpansions),
             boolOption(options, FUZZY_TRANSPOSITIONS_OPTION, FuzzyQuery.defaultTranspositions)
         );
+    }
+
+    private static Query parseQueryString(QueryParser parser, String queryText) {
+        if (queryText == null || queryText.isBlank()) {
+            // Preserve existing empty-query behavior.
+            return new MatchNoDocsQuery(EMPTY_QUERY_REASON);
+        }
+        parser.setAllowLeadingWildcard(true);               // ES query_string default (Lucene defaults to false)
+        parser.setDefaultOperator(QueryParser.Operator.OR); // Lucene default; set explicitly for clarity
+        try {
+            Query query = parser.parse(queryText);
+            if (query instanceof BooleanQuery bq && bq.clauses().isEmpty()) {
+                // Analyzer removed all terms (for example, "the" with a stop analyzer).
+                return new MatchNoDocsQuery(NO_TERMS_REASON);
+            }
+            return query;
+        } catch (ParseException | IllegalArgumentException e) {
+            // IllegalArgumentException covers unchecked parser failures (for example, invalid regex/fuzziness).
+            throw new IllegalArgumentException("Invalid query [" + queryText + "] in HIGHLIGHT: " + e.getMessage(), e);
+        }
+    }
+
+    private static QueryParser queryStringParser(List<String> fields, Analyzer analyzer) {
+        return switch (fields.size()) {
+            case 1 -> new HighlightClassicParser(fields.getFirst(), analyzer);
+            default -> new HighlightMultiFieldParser(fields.toArray(String[]::new), analyzer);
+        };
+    }
+
+    // Match query_string semantics: bare "~" => AUTO, "~N" => validated numeric edit distance.
+    private static float queryStringFuzzyDistance(Token fuzzyToken, String termStr) {
+        if (fuzzyToken.image.length() == 1) {
+            return Fuzziness.AUTO.asDistance(termStr);
+        }
+        return Fuzziness.fromString(fuzzyToken.image.substring(1)).asDistance(termStr);
+    }
+
+    private static final class HighlightMultiFieldParser extends MultiFieldQueryParser {
+        HighlightMultiFieldParser(String[] fields, Analyzer analyzer) {
+            super(fields, analyzer);
+        }
+
+        @Override
+        protected float getFuzzyDistance(Token fuzzyToken, String termStr) {
+            return queryStringFuzzyDistance(fuzzyToken, termStr);
+        }
+    }
+
+    private static final class HighlightClassicParser extends QueryParser {
+        HighlightClassicParser(String field, Analyzer analyzer) {
+            super(field, analyzer);
+        }
+
+        @Override
+        protected float getFuzzyDistance(Token fuzzyToken, String termStr) {
+            return queryStringFuzzyDistance(fuzzyToken, termStr);
+        }
     }
 
     /** QueryBuilder variant that emits Lucene {@link FuzzyQuery} without requiring a search execution context. */

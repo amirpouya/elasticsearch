@@ -99,6 +99,9 @@ public abstract class FullTextFunction extends Function
         RewriteableAware,
         PostOptimizationPlanVerificationAware {
 
+    private static final String UNSUPPORTED_LOCATION_FAILURE =
+        "[{}] {} is only supported in WHERE and STATS commands or in EVAL within score(.) function";
+
     private final Expression query;
     private final QueryBuilder queryBuilder;
 
@@ -229,39 +232,22 @@ public abstract class FullTextFunction extends Function
                 checkScoreFunction(plan, failures, scoreFunction);
                 plan.forEachExpression(FullTextFunction.class, scoredFTFs::add);
             });
-            plan.forEachExpression(FullTextFunction.class, ftf -> {
-                if (scoredFTFs.remove(ftf) == false) {
-                    failures.add(
-                        fail(
-                            ftf,
-                            "[{}] {} is only supported in WHERE and STATS commands or in EVAL within score(.) function",
-                            ftf.functionName(),
-                            ftf.functionType()
-                        )
-                    );
-                }
-            });
+            failFullTextFunctionsOutside(plan, failures, scoredFTFs);
         }
     }
 
     private static void checkFullTextFunctionsInHighlight(LogicalPlan plan, Highlight highlight, Failures failures) {
-        // A HIGHLIGHT query may be a full-text expression, so collect the full-text functions under its query into an
-        // allow-list (same collect-and-allow pattern as Score above); a full-text function anywhere else in the node
-        // is not allowed and hits the failure below.
         List<FullTextFunction> allowedFTFs = new ArrayList<>();
         if (highlight.query() != null) {
             highlight.query().forEachDown(FullTextFunction.class, allowedFTFs::add);
         }
+        failFullTextFunctionsOutside(plan, failures, allowedFTFs);
+    }
+
+    private static void failFullTextFunctionsOutside(LogicalPlan plan, Failures failures, List<FullTextFunction> allowedFTFs) {
         plan.forEachExpression(FullTextFunction.class, ftf -> {
             if (allowedFTFs.remove(ftf) == false) {
-                failures.add(
-                    fail(
-                        ftf,
-                        "[{}] {} is only supported in WHERE and STATS commands or in EVAL within score(.) function",
-                        ftf.functionName(),
-                        ftf.functionType()
-                    )
-                );
+                failures.add(fail(ftf, UNSUPPORTED_LOCATION_FAILURE, ftf.functionName(), ftf.functionType()));
             }
         });
     }

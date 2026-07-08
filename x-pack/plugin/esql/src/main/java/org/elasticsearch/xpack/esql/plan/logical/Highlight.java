@@ -14,7 +14,6 @@ import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.lucene.BytesRefs;
-import org.elasticsearch.compute.operator.HighlightQueryParser;
 import org.elasticsearch.xpack.esql.capabilities.PostAnalysisVerificationAware;
 import org.elasticsearch.xpack.esql.capabilities.TelemetryAware;
 import org.elasticsearch.xpack.esql.common.Failures;
@@ -271,7 +270,7 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
         try {
             String literal = queryTextIfLiteral(query);
             if (literal != null) {
-                HighlightQueryParser.parse(fieldNames, literal, DEFAULT_ANALYZER);
+                HighlightQueryTranslator.translateLiteral(literal, fieldNames, DEFAULT_ANALYZER);
             } else {
                 HighlightQueryTranslator.translate(query, fieldNames, DEFAULT_ANALYZER);
             }
