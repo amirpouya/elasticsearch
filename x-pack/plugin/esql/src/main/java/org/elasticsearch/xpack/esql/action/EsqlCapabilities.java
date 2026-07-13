@@ -274,6 +274,12 @@ public class EsqlCapabilities {
         OPTIONAL_FIELDS_FIX_UNMAPPED_LOAD_CONVERT_FUNCTION,
 
         /**
+         * Fix for {@code <no-fields>} leaking into plans when {@code unmapped_fields="load"} loads fields from an empty mapping.
+         * See https://github.com/elastic/elasticsearch/issues/141990.
+         */
+        OPTIONAL_FIELDS_FIX_UNMAPPED_LOAD_EMPTY_MAPPING_NO_FIELDS,
+
+        /**
          * Fix for LOOKUP JOIN and ENRICH failing when the match field has NULL type from unmapped field nullification.
          * See https://github.com/elastic/elasticsearch/issues/141827
          */
@@ -2678,6 +2684,13 @@ public class EsqlCapabilities {
          * on the {@code EXTERNAL} command, used to read headerless CSV files.
          */
         EXTERNAL_CSV_HEADER_ROW_OPTION,
+
+        /**
+         * The CSV/TSV file-level {@code datetime_format} option compiles to an Elasticsearch
+         * {@code DateFormatter} rather than a raw JDK {@code DateTimeFormatter}: zone offsets are honored,
+         * date-only patterns parse, and named formats and {@code a||b} composites are accepted.
+         */
+        EXTERNAL_CSV_DATETIME_FORMAT_ES_DATE_FORMATTER,
 
         /**
          * Per-file planner-resolved read schema is threaded down to runtime readers via
