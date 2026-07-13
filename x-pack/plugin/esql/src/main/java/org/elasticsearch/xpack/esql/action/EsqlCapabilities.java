@@ -3314,10 +3314,17 @@ public class EsqlCapabilities {
         PROMQL_SUM_ON_HISTOGRAM,
 
         /**
-         * Support for the {@code HIGHLIGHT} command, including the {@code WITH { "analyzer": ... }} option that selects a
-         * built-in or globally-registered analyzer for query tokenization and row-text re-analysis.
+         * Support for the {@code HIGHLIGHT} command.
+         * <p>
+         * V5: ON-field analyzers resolved automatically from the mapping (built-in names via field-caps propagation);
+         * index analyzer for text re-analysis, search analyzer for query tokenization; custom names and multi-index
+         * conflicts fall back to standard (Stage-1 limitation). Keyword ON fields use whole-value keyword semantics.
+         * <p>
+         * V6: optional {@code WITH { "analyzer": ... }} override that applies a single built-in or globally-registered
+         * analyzer to every ON field (both query tokenization and row-text re-analysis), overriding the automatic
+         * per-field resolution; an unknown or unloadable analyzer name fails fast at verification.
          */
-        HIGHLIGHT_V5(Build.current().isSnapshot()),
+        HIGHLIGHT_V6(Build.current().isSnapshot()),
 
         /**
          * Support for PromQL {@code histogram_quantile()} over classic histograms with {@code le} buckets.

@@ -9,10 +9,12 @@
 
 package org.elasticsearch.action.fieldcaps;
 
+import org.elasticsearch.TransportVersion;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.common.util.StringLiteralDeduplicator;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.index.mapper.TimeSeriesParams;
 
 import java.io.IOException;
@@ -27,6 +29,12 @@ import java.util.Map;
  * @param isAggregatable Whether this field can be aggregated on.
  * @param isInference    Whether this field is an inference field.
  * @param meta           Metadata about the field.
+ * @param indexAnalyzer  The name of the field's index-time analyzer, or {@code null} for fields that have no
+ *                       text-search information (e.g. numeric fields) or no index analyzer (e.g. runtime fields).
+ *                       Only built-in/prebuilt names are resolvable on the coordinator; index-custom names are still
+ *                       carried but will not resolve there.
+ * @param searchAnalyzer The name of the field's search-time analyzer, or {@code null} when the field has no
+ *                       text-search information. Same resolvability caveat as {@code indexAnalyzer}.
  */
 
 public record IndexFieldCapabilities(
@@ -38,8 +46,14 @@ public record IndexFieldCapabilities(
     boolean isInference,
     boolean isDimension,
     TimeSeriesParams.MetricType metricType,
-    Map<String, String> meta
+    Map<String, String> meta,
+    @Nullable String indexAnalyzer,
+    @Nullable String searchAnalyzer
 ) implements Writeable {
+
+    // Gates the field-caps and ES|QL EsField analyzer-name propagation, both introduced together, so a single shared
+    // transport version guards both wire-format additions (see also TextEsField).
+    static final TransportVersion MAPPING_ANALYZER_NAMES = TransportVersion.fromName("mapping_analyzer_names");
 
     private static final StringLiteralDeduplicator typeStringDeduplicator = new StringLiteralDeduplicator();
 
@@ -53,6 +67,12 @@ public record IndexFieldCapabilities(
         TimeSeriesParams.MetricType metricType = in.readOptionalEnum(TimeSeriesParams.MetricType.class);
         Map<String, String> meta = in.readImmutableMap(StreamInput::readString);
         boolean isInference = in.getTransportVersion().supports(FieldCapabilities.FIELD_CAPS_INFERENCE_FIELD) && in.readBoolean();
+        String indexAnalyzer = null;
+        String searchAnalyzer = null;
+        if (in.getTransportVersion().supports(MAPPING_ANALYZER_NAMES)) {
+            indexAnalyzer = in.readOptionalString();
+            searchAnalyzer = in.readOptionalString();
+        }
         return new IndexFieldCapabilities(
             name,
             type,
@@ -62,7 +82,9 @@ public record IndexFieldCapabilities(
             isInference,
             isDimension,
             metricType,
-            meta
+            meta,
+            indexAnalyzer,
+            searchAnalyzer
         );
     }
 
@@ -78,6 +100,10 @@ public record IndexFieldCapabilities(
         out.writeMap(meta, StreamOutput::writeString);
         if (out.getTransportVersion().supports(FieldCapabilities.FIELD_CAPS_INFERENCE_FIELD)) {
             out.writeBoolean(isInference);
+        }
+        if (out.getTransportVersion().supports(MAPPING_ANALYZER_NAMES)) {
+            out.writeOptionalString(indexAnalyzer);
+            out.writeOptionalString(searchAnalyzer);
         }
     }
 

@@ -32,6 +32,14 @@ import static org.elasticsearch.test.ESTestCase.randomList;
  */
 public class EsFieldTestUtils {
 
+    /**
+     * Gate for {@link TextEsField}'s analyzer names on the wire. Mirrors the production guard in
+     * {@code TextEsField#writeContent} so version-aware generation only sets analyzer names when the target
+     * version would actually serialize them; otherwise an older-version round-trip would drop the value and
+     * break equality assertions.
+     */
+    private static final TransportVersion MAPPING_ANALYZER_NAMES = TransportVersion.fromName("mapping_analyzer_names");
+
     private EsFieldTestUtils() {}
 
     /**
@@ -139,7 +147,20 @@ public class EsFieldTestUtils {
         boolean hasDocValues = randomBoolean();
         boolean isAlias = randomBoolean();
         EsField.TimeSeriesFieldType tsType = randomFrom(EsField.TimeSeriesFieldType.values());
-        return new TextEsField(name, properties, hasDocValues, isAlias, tsType);
+        // Only populate analyzer names when the target version serializes them, mirroring TextEsField#writeContent,
+        // so BWC round-trips at older versions don't drop a set value and fail equality (see MAPPING_ANALYZER_NAMES).
+        String indexAnalyzer = null;
+        String searchAnalyzer = null;
+        if (supportedOn == null || supportedOn.supports(MAPPING_ANALYZER_NAMES)) {
+            indexAnalyzer = randomAnalyzerName();
+            searchAnalyzer = randomAnalyzerName();
+        }
+        return new TextEsField(name, properties, hasDocValues, isAlias, tsType, indexAnalyzer, searchAnalyzer);
+    }
+
+    /** A random built-in analyzer name, or {@code null} to cover the "no analyzer propagated" case. */
+    private static String randomAnalyzerName() {
+        return randomBoolean() ? null : randomFrom("standard", "english", "keyword", "whitespace", "simple");
     }
 
     /**

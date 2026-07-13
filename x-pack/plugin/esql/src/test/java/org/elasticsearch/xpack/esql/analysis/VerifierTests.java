@@ -4569,7 +4569,7 @@ public class VerifierTests extends ESTestCase {
     }
 
     public void testHighlightRejectsInvalidOptionEnums() {
-        assumeTrue("requires HIGHLIGHT_V5 capability", EsqlCapabilities.Cap.HIGHLIGHT_V5.isEnabled());
+        assumeTrue("requires HIGHLIGHT_V6 capability", EsqlCapabilities.Cap.HIGHLIGHT_V6.isEnabled());
         assertInvalidHighlightOption("encoder", "xml");
         assertInvalidHighlightOption("boundary_scanner", "chars");
         assertInvalidHighlightOption("order", "doc");
@@ -4578,7 +4578,7 @@ public class VerifierTests extends ESTestCase {
     }
 
     public void testHighlightRejectsInvalidOptionValues() {
-        assumeTrue("requires HIGHLIGHT_V5 capability", EsqlCapabilities.Cap.HIGHLIGHT_V5.isEnabled());
+        assumeTrue("requires HIGHLIGHT_V6 capability", EsqlCapabilities.Cap.HIGHLIGHT_V6.isEnabled());
         assertInvalidHighlightOptionValue("pre_tags", "123", containsString("Option [pre_tags] must be a string"));
         assertInvalidHighlightOptionValue("post_tags", "true", containsString("Option [post_tags] must be a string"));
         assertInvalidHighlightOptionValue(
@@ -4616,7 +4616,7 @@ public class VerifierTests extends ESTestCase {
     }
 
     public void testHighlightRejectsNonStringOnField() {
-        assumeTrue("requires HIGHLIGHT_V5 capability", EsqlCapabilities.Cap.HIGHLIGHT_V5.isEnabled());
+        assumeTrue("requires HIGHLIGHT_V6 capability", EsqlCapabilities.Cap.HIGHLIGHT_V6.isEnabled());
         defaultAnalyzer().error(
             "FROM test | HIGHLIGHT \"x\" ON salary",
             containsString("HIGHLIGHT ON field [salary] must be [text] or [keyword], found [integer]")
@@ -4636,7 +4636,7 @@ public class VerifierTests extends ESTestCase {
     }
 
     public void testHighlightAcceptsValidQueries() {
-        assumeTrue("requires HIGHLIGHT_V5 capability", EsqlCapabilities.Cap.HIGHLIGHT_V5.isEnabled());
+        assumeTrue("requires HIGHLIGHT_V6 capability", EsqlCapabilities.Cap.HIGHLIGHT_V6.isEnabled());
         defaultAnalyzer().query("FROM test | HIGHLIGHT \"\\\"quick fox\\\" OR (ca* AND jump~) OR /f[ao]x/\" ON first_name");
         fullText().query("FROM test | HIGHLIGHT MATCH(title, \"fox\") ON title");
         fullText().query("FROM test | HIGHLIGHT MATCH_PHRASE(title, \"quick fox\") ON title");
@@ -4649,12 +4649,12 @@ public class VerifierTests extends ESTestCase {
     }
 
     public void testHighlightAcceptsRegisteredAnalyzer() {
-        assumeTrue("requires HIGHLIGHT_V5 capability", EsqlCapabilities.Cap.HIGHLIGHT_V5.isEnabled());
+        assumeTrue("requires HIGHLIGHT_V6 capability", EsqlCapabilities.Cap.HIGHLIGHT_V6.isEnabled());
         defaultAnalyzer().query("FROM test | HIGHLIGHT \"search\" ON first_name WITH { \"analyzer\": \"standard\" }");
     }
 
     public void testHighlightRejectsUnknownAnalyzerAtAnalysis() {
-        assumeTrue("requires HIGHLIGHT_V5 capability", EsqlCapabilities.Cap.HIGHLIGHT_V5.isEnabled());
+        assumeTrue("requires HIGHLIGHT_V6 capability", EsqlCapabilities.Cap.HIGHLIGHT_V6.isEnabled());
         defaultAnalyzer().error(
             "FROM test | HIGHLIGHT \"search\" ON first_name WITH { \"analyzer\": \"not_a_real_analyzer\" }",
             containsString("'analyzer' must be a built-in or globally-registered analyzer, found [not_a_real_analyzer]")
@@ -4662,7 +4662,7 @@ public class VerifierTests extends ESTestCase {
     }
 
     public void testHighlightSyntaxCheckedWithNamedAnalyzer() {
-        assumeTrue("requires HIGHLIGHT_V5 capability", EsqlCapabilities.Cap.HIGHLIGHT_V5.isEnabled());
+        assumeTrue("requires HIGHLIGHT_V6 capability", EsqlCapabilities.Cap.HIGHLIGHT_V6.isEnabled());
         // The query is still parsed (and rejected) when a registered analyzer override is resolved from the registry.
         defaultAnalyzer().error(
             "FROM test | HIGHLIGHT \"fox AND\" ON first_name WITH { \"analyzer\": \"whitespace\" }",
@@ -4671,7 +4671,7 @@ public class VerifierTests extends ESTestCase {
     }
 
     public void testHighlightUnknownAnalyzerReportsOnlyAnalyzerFailure() {
-        assumeTrue("requires HIGHLIGHT_V5 capability", EsqlCapabilities.Cap.HIGHLIGHT_V5.isEnabled());
+        assumeTrue("requires HIGHLIGHT_V6 capability", EsqlCapabilities.Cap.HIGHLIGHT_V6.isEnabled());
         // When the analyzer override can't be resolved, the query check is skipped so we don't double-report on the same clause.
         defaultAnalyzer().error(
             "FROM test | HIGHLIGHT \"fox AND\" ON first_name WITH { \"analyzer\": \"not_a_real_analyzer\" }",
@@ -4683,7 +4683,7 @@ public class VerifierTests extends ESTestCase {
     }
 
     public void testHighlightSurfacesQueryTranslationFailures() {
-        assumeTrue("requires HIGHLIGHT_V5 capability", EsqlCapabilities.Cap.HIGHLIGHT_V5.isEnabled());
+        assumeTrue("requires HIGHLIGHT_V6 capability", EsqlCapabilities.Cap.HIGHLIGHT_V6.isEnabled());
         defaultAnalyzer().error("FROM test | HIGHLIGHT \"fox AND\" ON first_name", containsString("Invalid query [fox AND] in HIGHLIGHT:"));
         fullText().error(
             "FROM test | HIGHLIGHT KQL(\"title: fox\") ON title",
@@ -4712,7 +4712,7 @@ public class VerifierTests extends ESTestCase {
     }
 
     public void testHighlightExpressionAfterStatsFailsFieldResolution() {
-        assumeTrue("requires HIGHLIGHT_V5 capability", EsqlCapabilities.Cap.HIGHLIGHT_V5.isEnabled());
+        assumeTrue("requires HIGHLIGHT_V6 capability", EsqlCapabilities.Cap.HIGHLIGHT_V6.isEnabled());
         fullText().error(
             "FROM test | STATS c = COUNT(*) | HIGHLIGHT MATCH(title, \"fox\") ON title",
             containsString("Unknown column [title]")

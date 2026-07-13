@@ -8,6 +8,7 @@
 package org.elasticsearch.xpack.esql.planner;
 
 import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.miscellaneous.PerFieldAnalyzerWrapper;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.queryparser.classic.MultiFieldQueryParser;
 import org.apache.lucene.queryparser.classic.ParseException;
@@ -81,7 +82,8 @@ public final class HighlightQueryTranslator {
     // auto_generate_synonyms_phrase_query, lenient, time_zone.
     private static final Set<String> QUERY_STRING_ALLOWED_OPTIONS = Set.of(DEFAULT_FIELD_OPTION);
 
-    // TODO: support the [analyzer] option once HIGHLIGHT can use non-default analyzers.
+    // The [analyzer] option stays rejected: HIGHLIGHT now derives each field's analyzer automatically from the mapping
+    // (propagated via field-caps), so a per-function override is intentionally not offered.
     private static final Set<String> MATCH_REJECTED_OPTIONS = Set.of(
         MatchQueryBuilder.ANALYZER_FIELD.getPreferredName(),
         MatchQueryBuilder.FUZZY_REWRITE_FIELD.getPreferredName(),
@@ -95,36 +97,71 @@ public final class HighlightQueryTranslator {
     );
 
     private final List<String> fields;
+    private final Map<String, Analyzer> searchAnalyzers;
     private final Analyzer defaultAnalyzer;
 
-    private HighlightQueryTranslator(List<String> fields, Analyzer defaultAnalyzer) {
+    private HighlightQueryTranslator(List<String> fields, Map<String, Analyzer> searchAnalyzers, Analyzer defaultAnalyzer) {
         this.fields = fields;
+        this.searchAnalyzers = searchAnalyzers;
         this.defaultAnalyzer = defaultAnalyzer;
+    }
+
+    /**
+     * Translates {@code query} using a single analyzer for every field. Used by analysis-time verification, where the
+     * per-field mapping analyzers have not been resolved yet.
+     */
+    public static Query translate(Expression query, List<String> fields, Analyzer defaultAnalyzer) {
+        return translate(query, fields, Map.of(), defaultAnalyzer);
     }
 
     /**
      * Translates {@code query} into a single Lucene {@link Query} over the given {@code fields}.
      * <p>
      * A query that folds to a string is parsed with {@code query_string} semantics; anything else is translated as an
-     * expression tree.
+     * expression tree. Query tokenization uses each field's own search analyzer (from {@code searchAnalyzers}), falling
+     * back to {@code defaultAnalyzer} for fields without one.
      *
      * @param query            the resolved HIGHLIGHT query expression (a full-text function, a boolean combination of
      *                         them, or an expression that folds to a query string)
      * @param fields           the real {@code ON} field names, in order
-     * @param defaultAnalyzer  the analyzer used to tokenize the query text
+     * @param searchAnalyzers  per-field search analyzers, keyed by {@code ON} field name (may be empty)
+     * @param defaultAnalyzer  the analyzer used to tokenize the query text for fields without a per-field analyzer
      * @throws IllegalArgumentException when the expression, a function, or an option is not supported by HIGHLIGHT
      */
-    public static Query translate(Expression query, List<String> fields, Analyzer defaultAnalyzer) {
+    public static Query translate(Expression query, List<String> fields, Map<String, Analyzer> searchAnalyzers, Analyzer defaultAnalyzer) {
         String literal = queryTextIfLiteral(query);
         if (literal != null) {
-            return translateLiteral(literal, fields, defaultAnalyzer);
+            return translateLiteral(literal, fields, searchAnalyzers, defaultAnalyzer);
         }
-        return new HighlightQueryTranslator(fields, defaultAnalyzer).doTranslate(query);
+        return new HighlightQueryTranslator(fields, searchAnalyzers, defaultAnalyzer).doTranslate(query);
     }
 
-    /** Parses a literal query string over the {@code ON} fields using query_string semantics. */
+    /** Parses a literal query string over the {@code ON} fields using query_string semantics and a single analyzer. */
     public static Query translateLiteral(String queryText, List<String> fields, Analyzer analyzer) {
-        return parseQueryString(queryStringParser(fields, analyzer), queryText);
+        return translateLiteral(queryText, fields, Map.of(), analyzer);
+    }
+
+    /**
+     * Parses a literal query string over the {@code ON} fields using query_string semantics. Each field is tokenized
+     * with its own search analyzer via a {@link PerFieldAnalyzerWrapper} (query parsers only call
+     * {@code tokenStream(field, ...)}, for which a delegating wrapper is safe).
+     */
+    public static Query translateLiteral(
+        String queryText,
+        List<String> fields,
+        Map<String, Analyzer> searchAnalyzers,
+        Analyzer defaultAnalyzer
+    ) {
+        return parseQueryString(queryStringParser(fields, perFieldAnalyzer(searchAnalyzers, defaultAnalyzer)), queryText);
+    }
+
+    /** The search analyzer for {@code field}, or the default when the field has no resolved per-field analyzer. */
+    private Analyzer analyzerFor(String field) {
+        return searchAnalyzers.getOrDefault(field, defaultAnalyzer);
+    }
+
+    private static Analyzer perFieldAnalyzer(Map<String, Analyzer> searchAnalyzers, Analyzer defaultAnalyzer) {
+        return searchAnalyzers.isEmpty() ? defaultAnalyzer : new PerFieldAnalyzerWrapper(defaultAnalyzer, searchAnalyzers);
     }
 
     /** Folded string query text, or {@code null} when the query does not fold to a string. */
@@ -160,7 +197,7 @@ public final class HighlightQueryTranslator {
             throw new IllegalArgumentException("HIGHLIGHT does not support [KQL] queries yet");
         }
         if (expr instanceof Literal literal && DataType.isString(literal.dataType())) {
-            return translateLiteral(BytesRefs.toString(literal.value()), fields, defaultAnalyzer);
+            return translateLiteral(BytesRefs.toString(literal.value()), fields, searchAnalyzers, defaultAnalyzer);
         }
         throw new IllegalArgumentException(
             "HIGHLIGHT query must be a full-text function (MATCH, MATCH_PHRASE, QSTR) or a boolean combination of them, found ["
@@ -179,7 +216,7 @@ public final class HighlightQueryTranslator {
         String field = fieldName(match.field());
         requireOnField(field);
         String text = queryText(match.query());
-        Query query = createMatchQueryBuilder(options, defaultAnalyzer).createBooleanQuery(field, text, matchOperator(options));
+        Query query = createMatchQueryBuilder(options, analyzerFor(field)).createBooleanQuery(field, text, matchOperator(options));
         query = matchNoTermsAsNoDocs(query, "HIGHLIGHT MATCH produced no terms");
         query = Queries.maybeApplyMinimumShouldMatch(query, stringOption(options, MINIMUM_SHOULD_MATCH_OPTION));
         return applyBoost(query, options);
@@ -193,7 +230,7 @@ public final class HighlightQueryTranslator {
         String text = queryText(matchPhrase.query());
         int slop = intOption(options, SLOP_OPTION, 0);
 
-        Query query = new QueryBuilder(defaultAnalyzer).createPhraseQuery(field, text, slop);
+        Query query = new QueryBuilder(analyzerFor(field)).createPhraseQuery(field, text, slop);
         query = matchNoTermsAsNoDocs(query, "HIGHLIGHT MATCH_PHRASE produced no terms");
         return applyBoost(query, options);
     }
@@ -207,7 +244,7 @@ public final class HighlightQueryTranslator {
             requireOnField(defaultField);
         }
         List<String> targetFields = defaultField != null ? List.of(defaultField) : fields;
-        return translateLiteral(text, targetFields, defaultAnalyzer);
+        return translateLiteral(text, targetFields, searchAnalyzers, defaultAnalyzer);
     }
 
     private static Query applyBoost(Query query, Map<String, Object> options) {

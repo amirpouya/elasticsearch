@@ -60,6 +60,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 
 import static org.elasticsearch.xpack.esql.core.type.DataType.DATETIME;
 import static org.elasticsearch.xpack.esql.core.type.DataType.FLATTENED;
@@ -552,7 +553,11 @@ public class IndexResolver {
         // TODO I think we only care about unmapped fields if we're aggregating on them. do we even then?
 
         if (type == TEXT) {
-            return new TextEsField(name, new HashMap<>(), false, isAlias, timeSeriesFieldType);
+            // Propagate the mapping analyzer names, but only when all indices agree (any null or disagreement drops to
+            // null so HIGHLIGHT falls back to the default analyzer downstream). Mirrors the multi-index merge above.
+            String indexAnalyzer = mergeAnalyzerName(fcs, IndexFieldCapabilities::indexAnalyzer);
+            String searchAnalyzer = mergeAnalyzerName(fcs, IndexFieldCapabilities::searchAnalyzer);
+            return new TextEsField(name, new HashMap<>(), false, isAlias, timeSeriesFieldType, indexAnalyzer, searchAnalyzer);
         }
         if (type == KEYWORD) {
             int length = Short.MAX_VALUE;
@@ -568,6 +573,25 @@ public class IndexResolver {
         }
 
         return new EsField(name, type, new HashMap<>(), aggregatable, isAlias, timeSeriesFieldType);
+    }
+
+    /**
+     * Reduces a per-field analyzer name across the index responses: returns the common name when every index reports
+     * the same non-null value, and {@code null} otherwise (an unmapped index contributes no entry to {@code fcs}, so it
+     * does not affect the result; a disagreement or a missing name in any mapped index drops to {@code null}).
+     */
+    @Nullable
+    private static String mergeAnalyzerName(List<IndexFieldCapabilities> fcs, Function<IndexFieldCapabilities, String> extractor) {
+        String merged = extractor.apply(fcs.get(0));
+        if (merged == null) {
+            return null;
+        }
+        for (int i = 1; i < fcs.size(); i++) {
+            if (merged.equals(extractor.apply(fcs.get(i))) == false) {
+                return null;
+            }
+        }
+        return merged;
     }
 
     // Visible for testing.

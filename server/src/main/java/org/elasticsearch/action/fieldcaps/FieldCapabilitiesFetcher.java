@@ -14,10 +14,13 @@ import org.elasticsearch.cluster.metadata.MappingMetadata;
 import org.elasticsearch.core.Booleans;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.index.IndexService;
+import org.elasticsearch.index.analysis.NamedAnalyzer;
 import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.mapper.MappedFieldType;
+import org.elasticsearch.index.mapper.MappingLookup;
 import org.elasticsearch.index.mapper.ObjectMapper;
 import org.elasticsearch.index.mapper.RuntimeField;
+import org.elasticsearch.index.mapper.TextSearchInfo;
 import org.elasticsearch.index.query.MatchAllQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.SearchExecutionContext;
@@ -168,11 +171,12 @@ class FieldCapabilitiesFetcher {
 
         Predicate<MappedFieldType> filter = buildFilter(filters, types, context);
         boolean isTimeSeriesIndex = context.getIndexSettings().getTimestampBounds() != null;
-        Set<String> inferenceFieldNames = context.getMappingLookup().inferenceFields().keySet();
+        MappingLookup mappingLookup = context.getMappingLookup();
+        Set<String> inferenceFieldNames = mappingLookup.inferenceFields().keySet();
         var fieldInfos = indexShard.getFieldInfos();
         includeEmptyFields = includeEmptyFields || enableFieldHasValue == false;
         Map<String, IndexFieldCapabilities> responseMap = new HashMap<>();
-        Map<String, ObjectMapper> objectMappers = context.getMappingLookup().objectMappers();
+        Map<String, ObjectMapper> objectMappers = mappingLookup.objectMappers();
         for (Map.Entry<String, MappedFieldType> entry : context.getAllFields()) {
             final String field = entry.getKey();
             MappedFieldType ft = entry.getValue();
@@ -182,6 +186,19 @@ class FieldCapabilitiesFetcher {
             if ((includeEmptyFields || ft.fieldHasValue(fieldInfos))
                 && (fieldPredicate.test(ft.name()) || context.isMetadataField(ft.name()))
                 && (filter == null || filter.test(ft))) {
+                TextSearchInfo textSearchInfo = ft.getTextSearchInfo();
+                // Analyzer names are propagated so that consumers (e.g. ES|QL HIGHLIGHT) can re-resolve the field's
+                // analyzer without a live SearchExecutionContext. Only tokenized (analyzed) text fields carry them:
+                // non-tokenized fields (keyword, numeric, date, ip, ...) report the internal keyword analyzer, which
+                // is neither resolvable via the AnalysisRegistry nor needed downstream (keyword highlighting is handled
+                // client-side), so propagating it would only add wire noise. The index analyzer additionally requires a
+                // mapping entry, which runtime fields lack, so the f -> null fallback keeps that lookup safe.
+                String searchAnalyzer = null;
+                String indexAnalyzer = null;
+                if (textSearchInfo != TextSearchInfo.NONE && textSearchInfo.isTokenized()) {
+                    searchAnalyzer = analyzerName(textSearchInfo.searchAnalyzer());
+                    indexAnalyzer = analyzerName(mappingLookup.indexAnalyzer(field, f -> null));
+                }
                 IndexFieldCapabilities fieldCap = new IndexFieldCapabilities(
                     field,
                     ft.familyTypeName(),
@@ -191,7 +208,9 @@ class FieldCapabilitiesFetcher {
                     inferenceFieldNames.contains(field),
                     isTimeSeriesIndex ? ft.isDimension() : false,
                     isTimeSeriesIndex ? ft.getMetricType() : null,
-                    ft.meta()
+                    ft.meta(),
+                    indexAnalyzer,
+                    searchAnalyzer
                 );
                 responseMap.put(field, fieldCap);
             } else {
@@ -222,7 +241,9 @@ class FieldCapabilitiesFetcher {
                             false,
                             false,
                             null,
-                            Map.of()
+                            Map.of(),
+                            null,
+                            null
                         );
                         responseMap.put(parentField, fieldCap);
                     }
@@ -231,6 +252,11 @@ class FieldCapabilitiesFetcher {
             }
         }
         return responseMap;
+    }
+
+    @Nullable
+    private static String analyzerName(@Nullable NamedAnalyzer analyzer) {
+        return analyzer == null ? null : analyzer.name();
     }
 
     private static boolean checkIncludeParents(String[] filters) {

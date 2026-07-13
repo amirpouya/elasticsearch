@@ -27,7 +27,7 @@ import java.util.Objects;
 import static org.elasticsearch.xpack.esql.expression.NamedExpressions.mergeOutputAttributes;
 
 // TODO: decide whether HIGHLIGHT should always run on the coordinator. For now we do not force a location in the planner.
-// TODO: carry the resolved analyzer name once the "analyzer" option is supported.
+// Per-field analyzer names live on the serialized EsField behind each ON FieldAttribute, so no plan-node field is needed.
 public class HighlightExec extends UnaryExec {
 
     public static final NamedWriteableRegistry.Entry ENTRY = new NamedWriteableRegistry.Entry(

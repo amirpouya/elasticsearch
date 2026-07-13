@@ -1,0 +1,131 @@
+---
+setup:
+  - requires:
+      capabilities:
+        - method: POST
+          path: /_query
+          parameters: [ method, path, parameters, capabilities ]
+          capabilities: [ highlight_v6 ]
+      reason: "HIGHLIGHT resolves each ON field's mapping analyzer"
+      test_runner_features: [ capabilities, allowed_warnings_regex ]
+  - do:
+      indices.create:
+        index: hl_english
+        body:
+          mappings:
+            properties:
+              content:
+                type: text
+                analyzer: english
+              body:
+                type: text
+              tag:
+                type: keyword
+              id:
+                type: integer
+  - do:
+      # Same field name "content", but analyzed with the default (standard) analyzer. Used to prove that a
+      # cross-index analyzer conflict collapses to the default analyzer.
+      indices.create:
+        index: hl_standard
+        body:
+          mappings:
+            properties:
+              content:
+                type: text
+              id:
+                type: integer
+  - do:
+      bulk:
+        index: hl_english
+        refresh: true
+        body:
+          - { "index": { } }
+          - { "content": "He was running fast", "body": "the quick brown fox", "tag": "high priority", "id": 1 }
+  - do:
+      bulk:
+        index: hl_standard
+        refresh: true
+        body:
+          - { "index": { } }
+          - { "content": "He was running fast", "id": 2 }
+
+---
+"english analyzer stems both the row text and the query":
+  - do:
+      allowed_warnings_regex:
+        - "No limit defined, adding default limit of \\[.*\\]"
+      esql.query:
+        body:
+          query: 'FROM hl_english | WHERE id == 1 | HIGHLIGHT "run" ON content | KEEP highlight_content'
+
+  - match: { columns.0.name: "highlight_content" }
+  - match: { columns.0.type: "keyword" }
+  - length: { values: 1 }
+  - match: { values.0.0: "He was <em>running</em> fast" }
+
+---
+"default analyzer highlights the exact matching term":
+  - do:
+      allowed_warnings_regex:
+        - "No limit defined, adding default limit of \\[.*\\]"
+      esql.query:
+        body:
+          query: 'FROM hl_english | WHERE id == 1 | HIGHLIGHT "fox" ON body | KEEP highlight_body'
+
+  - match: { columns.0.name: "highlight_body" }
+  - length: { values: 1 }
+  - match: { values.0.0: "the quick brown <em>fox</em>" }
+
+---
+"default analyzer does not stem":
+  - do:
+      allowed_warnings_regex:
+        - "No limit defined, adding default limit of \\[.*\\]"
+      esql.query:
+        body:
+          query: 'FROM hl_standard | WHERE id == 2 | HIGHLIGHT "run" ON content | KEEP highlight_content'
+
+  # The standard analyzer keeps "running" verbatim, so the stem "run" does not match and the field yields null.
+  - length: { values: 1 }
+  - match: { values.0.0: null }
+
+---
+"keyword field highlights the whole value on an exact match":
+  - do:
+      allowed_warnings_regex:
+        - "No limit defined, adding default limit of \\[.*\\]"
+      esql.query:
+        body:
+          query: 'FROM hl_english | WHERE id == 1 | HIGHLIGHT "high priority" ON tag | KEEP highlight_tag'
+
+  - length: { values: 1 }
+  - match: { values.0.0: "<em>high priority</em>" }
+
+---
+"keyword field does not highlight a partial term":
+  - do:
+      allowed_warnings_regex:
+        - "No limit defined, adding default limit of \\[.*\\]"
+      esql.query:
+        body:
+          query: 'FROM hl_english | WHERE id == 1 | HIGHLIGHT "high" ON tag | KEEP highlight_tag'
+
+  # Keyword fields index the whole value as one token, so a partial term never matches -> null.
+  - length: { values: 1 }
+  - match: { values.0.0: null }
+
+---
+"conflicting per-index analyzers collapse to the default analyzer":
+  - do:
+      allowed_warnings_regex:
+        - "No limit defined, adding default limit of \\[.*\\]"
+      esql.query:
+        body:
+          query: 'FROM hl_english,hl_standard | WHERE id == 1 | HIGHLIGHT "run" ON content | KEEP highlight_content'
+
+  # content is analyzed with english in one index and standard in the other; the names disagree, so the merged
+  # analyzer drops to the default. The english document is therefore highlighted with the standard analyzer, which
+  # does not stem, so "run" no longer matches "running" -> null.
+  - length: { values: 1 }
+  - match: { values.0.0: null }

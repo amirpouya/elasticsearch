@@ -8,6 +8,7 @@
 package org.elasticsearch.compute.operator;
 
 import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.miscellaneous.PerFieldAnalyzerWrapper;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.memory.MemoryIndex;
 import org.apache.lucene.search.IndexSearcher;
@@ -41,8 +42,10 @@ import java.io.IOException;
 import java.text.BreakIterator;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.function.Supplier;
 
 /**
@@ -52,11 +55,16 @@ import java.util.function.Supplier;
  * analyzed into an in-memory document, the configured {@link Query} is run against it, and matched terms are wrapped
  * with the configured tags. Non-matching rows yield {@code null} (or leading text when {@code no_match_size > 0}).
  * <p>
+ * Each field is analyzed with its own mapping index analyzer (resolved during planning and carried in
+ * {@link HighlightConfig#indexAnalyzers()}), composed into a single {@link PerFieldAnalyzerWrapper}; fields without a
+ * resolved analyzer use {@link HighlightConfig#defaultAnalyzer()}. See {@link #buildMemoryIndexAnalyzer} for the
+ * (order-sensitive) composition.
+ * <p>
  * The {@link MemoryIndex} is built with offsets ({@link UnifiedHighlighter.OffsetSource#POSTINGS}), matching the
  * coordinator-side path used by {@code TOP_SNIPPETS}. Unlike Query DSL highlighting, analyzed tokens are truncated at
  * the configured/default offset instead of throwing a "field too long" error.
  * <p>
- * TODO: use real index offsets and per-field analyzers when highlighting can run against shard data.
+ * TODO: use real index offsets when highlighting can run against shard data.
  */
 public class HighlightOperator extends AbstractPageMappingOperator {
 
@@ -80,7 +88,6 @@ public class HighlightOperator extends AbstractPageMappingOperator {
     private final HighlightConfig config;
     private final Query query;
     private final List<String> fieldNames;
-    private final Analyzer analyzer;
     private final Analyzer memoryIndexAnalyzer;
     private final PassageFormatter formatter;
     private final int indexMaxAnalyzedOffset;
@@ -93,7 +100,6 @@ public class HighlightOperator extends AbstractPageMappingOperator {
         this.blockFactory = blockFactory;
         this.config = config;
         this.fieldEvaluators = fieldEvaluators;
-        this.analyzer = config.requiredAnalyzer();
         this.query = config.requiredQuery();
         this.fieldNames = config.fieldNames();
         assert fieldNames.size() == fieldEvaluators.length
@@ -106,8 +112,7 @@ public class HighlightOperator extends AbstractPageMappingOperator {
         int configuredOffset = config.maxAnalyzedOffset();
         int queryOffset = configuredOffset < 0 ? indexMaxAnalyzedOffset : Math.min(configuredOffset, indexMaxAnalyzedOffset);
         this.queryMaxAnalyzedOffset = QueryMaxAnalyzedOffset.create(queryOffset, indexMaxAnalyzedOffset);
-        Analyzer indexingAnalyzer = analyzer instanceof NamedAnalyzer named ? named.analyzer() : analyzer;
-        this.memoryIndexAnalyzer = new LimitTokenOffsetAnalyzer(indexingAnalyzer, queryMaxAnalyzedOffset.getNotNull());
+        this.memoryIndexAnalyzer = buildMemoryIndexAnalyzer(config, queryMaxAnalyzedOffset);
         // number_of_fragments=0 means whole value; CustomUnifiedHighlighter uses MAX_VALUE-1 for that.
         this.highlighterNumberOfFragments = config.numberOfFragments() > 0 ? config.numberOfFragments() : Integer.MAX_VALUE - 1;
         this.breakIteratorSupplier = breakIterator(
@@ -116,6 +121,28 @@ public class HighlightOperator extends AbstractPageMappingOperator {
             config.wordBoundary(),
             config.locale()
         );
+    }
+
+    /**
+     * Builds the per-field analyzer used to populate the per-row {@link MemoryIndex}, one leaf per ON field.
+     * <p>
+     * Composition order matters and is deliberate. {@link NamedAnalyzer} and {@link PerFieldAnalyzerWrapper} are both
+     * {@code DelegatingAnalyzerWrapper}s, which cannot be re-wrapped by a plain {@code AnalyzerWrapper} such as
+     * {@link LimitTokenOffsetAnalyzer} (it throws at {@code tokenStream(...)}). So we must: (1) unwrap each
+     * {@link NamedAnalyzer} to its leaf, (2) wrap each leaf in {@link LimitTokenOffsetAnalyzer}, and only then
+     * (3) combine the offset-limited leaves inside a single {@link PerFieldAnalyzerWrapper}. The wrapper itself must
+     * not be wrapped again.
+     */
+    private static Analyzer buildMemoryIndexAnalyzer(HighlightConfig config, QueryMaxAnalyzedOffset queryMaxAnalyzedOffset) {
+        Map<String, Analyzer> limited = new HashMap<>();
+        config.indexAnalyzers().forEach((field, analyzer) -> limited.put(field, limitOffset(analyzer, queryMaxAnalyzedOffset)));
+        Analyzer defaultLimited = limitOffset(config.requiredDefaultAnalyzer(), queryMaxAnalyzedOffset);
+        return new PerFieldAnalyzerWrapper(defaultLimited, limited);
+    }
+
+    private static Analyzer limitOffset(Analyzer analyzer, QueryMaxAnalyzedOffset queryMaxAnalyzedOffset) {
+        Analyzer leaf = analyzer instanceof NamedAnalyzer named ? named.analyzer() : analyzer;
+        return new LimitTokenOffsetAnalyzer(leaf, queryMaxAnalyzedOffset.getNotNull());
     }
 
     // Mirrors DefaultHighlighter#getBreakIterator: the word scanner ignores fragment_size, the sentence scanner honours it.
@@ -278,7 +305,9 @@ public class HighlightOperator extends AbstractPageMappingOperator {
     // TODO(perf): reuse a per-field CustomUnifiedHighlighter across rows; the Query is constant and the searcher
     // argument is unused under POSTINGS + WEIGHT_MATCHES today (Lucene internal — guard with a multi-row test).
     private Snippet[] highlight(IndexSearcher searcher, String field, String text) throws IOException {
-        UnifiedHighlighter.Builder builder = UnifiedHighlighter.builder(searcher, analyzer);
+        // OffsetSource.POSTINGS reads offsets from the memory index, so this analyzer is not used for re-analysis;
+        // the per-field memory-index analyzer is passed for consistency and to satisfy the builder contract.
+        UnifiedHighlighter.Builder builder = UnifiedHighlighter.builder(searcher, memoryIndexAnalyzer);
         builder.withFormatter(formatter);
         builder.withBreakIterator(breakIteratorSupplier);
         CustomUnifiedHighlighter highlighter = new CustomUnifiedHighlighter(

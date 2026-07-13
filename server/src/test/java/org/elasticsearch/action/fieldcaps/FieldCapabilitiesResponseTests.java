@@ -184,6 +184,13 @@ public class FieldCapabilitiesResponseTests extends AbstractWireSerializingTestC
             "inference field flag requires transport version " + FieldCapabilities.FIELD_CAPS_INFERENCE_FIELD,
             hasInferenceField == false || version.supports(FieldCapabilities.FIELD_CAPS_INFERENCE_FIELD)
         );
+        final boolean hasAnalyzerNames = indexResponses.stream()
+            .flatMap(r -> r.get().values().stream())
+            .anyMatch(f -> f.indexAnalyzer() != null || f.searchAnalyzer() != null);
+        assumeTrue(
+            "analyzer names require transport version " + IndexFieldCapabilities.MAPPING_ANALYZER_NAMES,
+            hasAnalyzerNames == false || version.supports(IndexFieldCapabilities.MAPPING_ANALYZER_NAMES)
+        );
 
         final FieldCapabilitiesResponse outResponse = copyInstance(inResponse, version);
         assertThat(

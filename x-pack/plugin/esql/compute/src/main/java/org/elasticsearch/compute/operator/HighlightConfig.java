@@ -12,6 +12,7 @@ import org.apache.lucene.search.Query;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -20,8 +21,9 @@ import java.util.Objects;
  * It contains two groups of values:
  * <ul>
  *     <li>user-facing highlight options resolved from {@code WITH { ... }}</li>
- *     <li>execution context ({@link Analyzer}, translated {@link Query}, and target field names) attached during
- *     planning via {@link #withExecutionContext(Analyzer, Query, List)}</li>
+ *     <li>execution context (per-field index {@link Analyzer}s plus a default, the translated {@link Query}, and target
+ *     field names) attached during planning via
+ *     {@link #withExecutionContext(Map, Analyzer, Query, List)}</li>
  * </ul>
  * Keeping this record in the compute module (rather than referencing the ES|QL planning-layer options type) keeps
  * operator wiring localized to the compute package.
@@ -38,11 +40,14 @@ import java.util.Objects;
  * @param locale             locale used by the break iterator (the {@code boundary_scanner_locale} option).
  * @param orderByScore       when {@code true} fragments are returned by descending score instead of document order
  *                           (the {@code order=score} option).
- * @param analyzerName       the user-supplied {@code analyzer} override, or {@code null} when unset (HIGHLIGHT then uses
- *                           the default analyzer). Carried for describe/plan output only.
+ * @param analyzerName       the user-supplied {@code analyzer} override, or {@code null} when unset (analyzers are then
+ *                           derived per field from the mapping). Carried for describe/plan output only.
  * @param maxAnalyzedOffset  per-field analysis bound; a negative value means "use the default index setting" in the
  *                           current coordinator-side operator.
- * @param analyzer           analyzer used to build the per-row memory index and configure the unified highlighter.
+ * @param indexAnalyzers     per-field index-time analyzers, keyed by {@code ON} field name, used to analyze each
+ *                           field's row text into the per-row memory index. Fields absent from the map use
+ *                           {@code defaultAnalyzer}.
+ * @param defaultAnalyzer    index analyzer used for fields with no per-field entry in {@code indexAnalyzers}.
  * @param query              translated Lucene query used for matching and snippet extraction.
  * @param fieldNames         highlighted field names, in the same order as field evaluators.
  */
@@ -59,7 +64,8 @@ public record HighlightConfig(
     boolean orderByScore,
     String analyzerName,
     int maxAnalyzedOffset,
-    Analyzer analyzer,
+    Map<String, Analyzer> indexAnalyzers,
+    Analyzer defaultAnalyzer,
     Query query,
     List<String> fieldNames
 ) {
@@ -94,6 +100,7 @@ public record HighlightConfig(
             orderByScore,
             analyzerName,
             maxAnalyzedOffset,
+            Map.of(),
             null,
             null,
             List.of()
@@ -101,10 +108,16 @@ public record HighlightConfig(
     }
 
     public HighlightConfig {
+        indexAnalyzers = Map.copyOf(indexAnalyzers);
         fieldNames = List.copyOf(fieldNames);
     }
 
-    public HighlightConfig withExecutionContext(Analyzer analyzer, Query query, List<String> fieldNames) {
+    public HighlightConfig withExecutionContext(
+        Map<String, Analyzer> indexAnalyzers,
+        Analyzer defaultAnalyzer,
+        Query query,
+        List<String> fieldNames
+    ) {
         return new HighlightConfig(
             queryText,
             preTag,
@@ -118,14 +131,15 @@ public record HighlightConfig(
             orderByScore,
             analyzerName,
             maxAnalyzedOffset,
-            analyzer,
+            indexAnalyzers,
+            defaultAnalyzer,
             query,
             fieldNames
         );
     }
 
-    public Analyzer requiredAnalyzer() {
-        return Objects.requireNonNull(analyzer, "HIGHLIGHT analyzer must be set in execution context");
+    public Analyzer requiredDefaultAnalyzer() {
+        return Objects.requireNonNull(defaultAnalyzer, "HIGHLIGHT default analyzer must be set in execution context");
     }
 
     public Query requiredQuery() {

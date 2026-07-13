@@ -28,14 +28,18 @@ public class TextEsFieldTests extends AbstractEsFieldTypeTests<TextEsField> {
         boolean hasDocValues = instance.isAggregatable();
         boolean isAlias = instance.isAlias();
         EsField.TimeSeriesFieldType tsType = instance.getTimeSeriesFieldType();
-        switch (between(0, 4)) {
+        String indexAnalyzer = instance.indexAnalyzer();
+        String searchAnalyzer = instance.searchAnalyzer();
+        switch (between(0, 6)) {
             case 0 -> name = randomAlphaOfLength(name.length() + 1);
             case 1 -> properties = randomValueOtherThan(properties, () -> randomProperties(4));
             case 2 -> hasDocValues = false == hasDocValues;
             case 3 -> isAlias = false == isAlias;
             case 4 -> tsType = randomValueOtherThan(tsType, () -> randomFrom(EsField.TimeSeriesFieldType.values()));
+            case 5 -> indexAnalyzer = randomValueOtherThan(indexAnalyzer, () -> randomBoolean() ? null : randomAlphaOfLength(5));
+            case 6 -> searchAnalyzer = randomValueOtherThan(searchAnalyzer, () -> randomBoolean() ? null : randomAlphaOfLength(5));
             default -> throw new IllegalArgumentException();
         }
-        return new TextEsField(name, properties, hasDocValues, isAlias, tsType);
+        return new TextEsField(name, properties, hasDocValues, isAlias, tsType, indexAnalyzer, searchAnalyzer);
     }
 }

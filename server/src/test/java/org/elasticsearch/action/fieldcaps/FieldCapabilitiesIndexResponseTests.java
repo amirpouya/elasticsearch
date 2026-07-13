@@ -40,7 +40,9 @@ public class FieldCapabilitiesIndexResponseTests extends ESTestCase {
                 randomBoolean(),
                 randomBoolean(),
                 metricType,
-                meta
+                meta,
+                randomBoolean() ? null : randomAlphaOfLength(5),
+                randomBoolean() ? null : randomAlphaOfLength(5)
             );
             fieldCaps.put(field, fieldCap);
         }

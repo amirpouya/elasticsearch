@@ -122,6 +122,8 @@ import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.core.type.EsField;
 import org.elasticsearch.xpack.esql.core.type.FunctionEsField;
+import org.elasticsearch.xpack.esql.core.type.KeywordEsField;
+import org.elasticsearch.xpack.esql.core.type.TextEsField;
 import org.elasticsearch.xpack.esql.core.util.Holder;
 import org.elasticsearch.xpack.esql.datasources.AsyncExternalSourceOperatorFactory;
 import org.elasticsearch.xpack.esql.datasources.DeferredExtractionCapable;
@@ -1312,8 +1314,8 @@ public class LocalExecutionPlanner {
         );
     }
 
-    // TODO: when highlighting can run directly against shard data, use real index offsets and per-field analyzers
-    // instead of re-analyzing each row in a MemoryIndex.
+    // TODO: when highlighting can run directly against shard data, use real index offsets instead of re-analyzing each
+    // row in a MemoryIndex.
     private PhysicalOperation planHighlight(HighlightExec highlight, LocalExecutionPlannerContext context) {
         PhysicalOperation source = plan(highlight.child(), context);
 
@@ -1322,16 +1324,45 @@ public class LocalExecutionPlanner {
             throw new EsqlIllegalArgumentException("HIGHLIGHT requires an explicit query");
         }
         HighlightOptions options = HighlightOptions.from(highlight.options(), context.foldCtx());
-        // An explicit WITH { "analyzer": ... } option selects the analyzer used for both query tokenization and
-        // row-text re-analysis; without it, HIGHLIGHT uses the default analyzer for every ON field. An unknown name is
-        // rejected here (fail fast), matching Highlight#resolveVerificationAnalyzer.
-        Analyzer override = resolveHighlightAnalyzer(options.analyzerName(), context.analysisRegistry());
-        Analyzer analyzer = override != null ? override : Highlight.DEFAULT_ANALYZER;
         List<String> fieldNames = highlight.fields().stream().map(NamedExpression::name).toList();
 
+        // An explicit WITH { "analyzer": ... } override wins over the automatic per-field resolution below: when set, it
+        // resolves to a single analyzer (failing fast if unknown, matching Highlight#verifyAnalyzer) that is applied to
+        // every ON field, for both query tokenization and row-text re-analysis.
+        Analyzer override = resolveHighlightAnalyzer(options.analyzerName(), context.analysisRegistry());
+
+        // With no override, resolve each ON field's own analyzer from the mapping (built-in names via field-caps
+        // propagation). The index analyzer re-analyzes row text for the MemoryIndex; the search analyzer tokenizes the
+        // query (Query DSL parity). Keyword-family fields get whole-value keyword semantics. Everything else
+        // (custom/unresolvable names, multi-index conflicts, non-field ON entries) falls back to the standard default,
+        // preserving prior behavior.
+        Map<String, Analyzer> indexAnalyzers = new HashMap<>();
+        Map<String, Analyzer> searchAnalyzers = new HashMap<>();
+        for (NamedExpression field : highlight.fields()) {
+            Analyzer indexAnalyzer;
+            Analyzer searchAnalyzer;
+            if (override != null) {
+                indexAnalyzer = searchAnalyzer = override;
+            } else {
+                indexAnalyzer = Highlight.DEFAULT_ANALYZER;
+                searchAnalyzer = Highlight.DEFAULT_ANALYZER;
+                if (field instanceof FieldAttribute fa) {
+                    if (fa.field() instanceof TextEsField textField) {
+                        indexAnalyzer = resolveAnalyzer(textField.indexAnalyzer(), context.analysisRegistry());
+                        searchAnalyzer = resolveAnalyzer(textField.searchAnalyzer(), context.analysisRegistry());
+                    } else if (fa.field() instanceof KeywordEsField) {
+                        indexAnalyzer = searchAnalyzer = Highlight.KEYWORD_ANALYZER;
+                    }
+                }
+            }
+            indexAnalyzers.put(field.name(), indexAnalyzer);
+            searchAnalyzers.put(field.name(), searchAnalyzer);
+        }
+
+        Analyzer defaultAnalyzer = override != null ? override : Highlight.DEFAULT_ANALYZER;
         String literal = HighlightQueryTranslator.queryTextIfLiteral(queryExpr);
         String queryText = literal != null ? literal : queryExpr.sourceText();
-        Query query = HighlightQueryTranslator.translate(queryExpr, fieldNames, analyzer);
+        Query query = HighlightQueryTranslator.translate(queryExpr, fieldNames, searchAnalyzers, defaultAnalyzer);
 
         HighlightConfig config = new HighlightConfig(
             queryText,
@@ -1346,7 +1377,7 @@ public class LocalExecutionPlanner {
             HighlightOptions.ORDER_SCORE.equals(options.order()),
             options.analyzerName(),
             options.maxAnalyzedOffset()
-        ).withExecutionContext(analyzer, query, fieldNames);
+        ).withExecutionContext(indexAnalyzers, defaultAnalyzer, query, fieldNames);
 
         List<ExpressionEvaluator.Factory> fieldEvaluators = highlight.fields()
             .stream()
@@ -1363,11 +1394,12 @@ public class LocalExecutionPlanner {
     }
 
     /**
-     * Resolves the HIGHLIGHT {@code analyzer} option to a single Lucene {@link Analyzer}, or {@code null} when the option
-     * is unset (the caller then uses the default analyzer for every field). An explicit option that cannot be resolved is
-     * a user error and is rejected, mirroring the fail-fast verification in {@code Highlight#resolveVerificationAnalyzer}.
-     * Only built-in (prebuilt) and globally-registered analyzers are resolvable — HIGHLIGHT runs on the coordinator
-     * without a target index's {@code IndexSettings}, so index-level custom analyzers are out of scope.
+     * Resolves the HIGHLIGHT {@code analyzer} override option to a single Lucene {@link Analyzer}, or {@code null} when
+     * the option is unset (the caller then derives analyzers per field from the mapping). Unlike {@link #resolveAnalyzer}
+     * this does <b>not</b> fall back to the default: an explicit override that cannot be resolved is a user error and is
+     * rejected, mirroring the fail-fast verification in {@code Highlight#resolveVerificationAnalyzer}. Only built-in
+     * (prebuilt) and globally-registered analyzers are resolvable — HIGHLIGHT runs on the coordinator without a target
+     * index's {@code IndexSettings}, so index-level custom analyzers are out of scope.
      */
     private static Analyzer resolveHighlightAnalyzer(@Nullable String analyzerName, @Nullable AnalysisRegistry analysisRegistry) {
         if (analyzerName == null) {
@@ -1385,6 +1417,24 @@ public class LocalExecutionPlanner {
             throw new InvalidArgumentException(e, "failed to load analyzer [{}]", analyzerName);
         }
         throw new InvalidArgumentException("'analyzer' must be a built-in or globally-registered analyzer, found [{}]", analyzerName);
+    }
+
+    /**
+     * Resolves an analyzer name through the executing node's {@link AnalysisRegistry}, falling back to
+     * {@link Highlight#DEFAULT_ANALYZER} when the name is absent, the registry is unavailable, the name is not
+     * registry-resolvable (i.e. an index-custom analyzer — the documented Stage-1 limitation), or resolution fails.
+     * The fallback preserves today's behavior for standard fields, so existing tests stay green.
+     */
+    private static Analyzer resolveAnalyzer(@Nullable String name, @Nullable AnalysisRegistry analysisRegistry) {
+        if (name == null || analysisRegistry == null) {
+            return Highlight.DEFAULT_ANALYZER;
+        }
+        try {
+            Analyzer analyzer = analysisRegistry.getAnalyzer(name);
+            return analyzer != null ? analyzer : Highlight.DEFAULT_ANALYZER;
+        } catch (IOException e) {
+            return Highlight.DEFAULT_ANALYZER;
+        }
     }
 
     private PhysicalOperation planHashJoin(HashJoinExec join, LocalExecutionPlannerContext context) {

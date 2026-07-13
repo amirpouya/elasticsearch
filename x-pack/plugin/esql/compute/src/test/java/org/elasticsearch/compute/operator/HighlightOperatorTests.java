@@ -8,6 +8,9 @@
 package org.elasticsearch.compute.operator;
 
 import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.core.KeywordAnalyzer;
+import org.apache.lucene.analysis.core.WhitespaceAnalyzer;
+import org.apache.lucene.analysis.en.EnglishAnalyzer;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause;
@@ -25,12 +28,15 @@ import org.elasticsearch.compute.expression.ExpressionEvaluator;
 import org.elasticsearch.compute.expression.LoadFromPageEvaluator;
 import org.elasticsearch.compute.test.OperatorTestCase;
 import org.elasticsearch.compute.test.operator.blocksource.BytesRefBlockSourceOperator;
+import org.elasticsearch.index.analysis.AnalyzerScope;
+import org.elasticsearch.index.analysis.NamedAnalyzer;
 import org.elasticsearch.lucene.search.uhighlight.Snippet;
 import org.hamcrest.Matcher;
 
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.stream.IntStream;
 
 import static org.hamcrest.Matchers.contains;
@@ -57,7 +63,7 @@ public class HighlightOperatorTests extends OperatorTestCase {
     @Override
     protected Operator.OperatorFactory simple(SimpleOptions options) {
         Analyzer analyzer = new StandardAnalyzer();
-        HighlightConfig config = config("fox", 5, 0, 0).withExecutionContext(analyzer, contentTerm("fox"), CONTENT);
+        HighlightConfig config = config("fox", 5, 0, 0).withExecutionContext(Map.of(), analyzer, contentTerm("fox"), CONTENT);
         return new HighlightOperator.Factory(config, List.of(new LoadFromPageEvaluator.Factory(0)));
     }
 
@@ -65,7 +71,8 @@ public class HighlightOperatorTests extends OperatorTestCase {
     protected Matcher<String> expectedDescriptionOfSimple() {
         return equalTo(
             "HighlightOperator[query=fox, pre_tag=<em>, post_tag=</em>, encoder=default, number_of_fragments=5, fragment_size=0, "
-                + "no_match_size=0, word_boundary=false, locale=, order_by_score=false, analyzer=null, max_analyzed_offset=-1, fields=1]"
+                + "no_match_size=0, word_boundary=false, locale=, order_by_score=false, analyzer=null, max_analyzed_offset=-1, "
+                + "fields=1]"
         );
     }
 
@@ -244,7 +251,7 @@ public class HighlightOperatorTests extends OperatorTestCase {
         try (
             HighlightOperator operator = new HighlightOperator(
                 blockFactory(),
-                config("fox", 5, 0, 0).withExecutionContext(analyzer, contentTerm("fox"), CONTENT),
+                config("fox", 5, 0, 0).withExecutionContext(Map.of(), analyzer, contentTerm("fox"), CONTENT),
                 new ExpressionEvaluator[] { new LoadFromPageEvaluator(0) }
             )
         ) {
@@ -266,6 +273,108 @@ public class HighlightOperatorTests extends OperatorTestCase {
         );
         try {
             assertThat(value(result, 0), equalTo("The <em>quick brown fox</em> jumps over the lazy dog."));
+        } finally {
+            result.close();
+        }
+    }
+
+    public void testIndexAnalyzerStemsRowTextForMatching() {
+        // EnglishAnalyzer stems "rings" -> "ring", so the query term "ring" matches; StandardAnalyzer would index
+        // "rings" verbatim and miss it. Proves the row text is re-analyzed with the field's own index analyzer.
+        BytesRefBlock stemmed = highlightWithIndexAnalyzer(
+            config("ring", 5, 0, 0),
+            Map.of(CONTENT_FIELD, new EnglishAnalyzer()),
+            new StandardAnalyzer(),
+            contentTerm("ring"),
+            "running rings"
+        );
+        try {
+            assertThat(value(stemmed, 0), equalTo("running <em>rings</em>"));
+        } finally {
+            stemmed.close();
+        }
+
+        // With the default StandardAnalyzer the row text is indexed as "rings", so "ring" does not match.
+        BytesRefBlock notStemmed = highlightWithIndexAnalyzer(
+            config("ring", 5, 0, 0),
+            Map.of(),
+            new StandardAnalyzer(),
+            contentTerm("ring"),
+            "running rings"
+        );
+        try {
+            assertThat(notStemmed.isNull(0), equalTo(true));
+        } finally {
+            notStemmed.close();
+        }
+    }
+
+    public void testPerFieldIndexAnalyzersTokenizeIndependently() {
+        // title uses a case-preserving whitespace analyzer, body uses the lowercasing standard analyzer. The query term
+        // is capitalized "Fox", matching only the whitespace-analyzed title; the standard-analyzed body lowercases to
+        // "fox" and does not match. Swapping the analyzers would flip the result, proving each field uses its own.
+        Query query = new BooleanQuery.Builder().add(termQuery("title", "Fox"), BooleanClause.Occur.SHOULD)
+            .add(termQuery("body", "Fox"), BooleanClause.Occur.SHOULD)
+            .build();
+        BytesRefBlock title = bytesRefs(List.of(List.of("Fox")));
+        BytesRefBlock body = bytesRefs(List.of(List.of("Fox")));
+        Map<String, Analyzer> indexAnalyzers = Map.of("title", new WhitespaceAnalyzer(), "body", new StandardAnalyzer());
+        Page result = highlightFields(config("Fox", 5, 0, 0), indexAnalyzers, query, TITLE_BODY, title, body);
+        try {
+            BytesRefBlock highlightTitle = result.getBlock(2);
+            BytesRefBlock highlightBody = result.getBlock(3);
+            assertThat(value(highlightTitle, 0), equalTo("<em>Fox</em>"));
+            assertThat(highlightBody.isNull(0), equalTo(true));
+        } finally {
+            result.releaseBlocks();
+        }
+    }
+
+    public void testKeywordAnalyzerGivesWholeValueSemantics() {
+        // KeywordAnalyzer emits the entire value as a single token, so only a whole-value term matches (and highlights
+        // the entire value); a sub-token query does not match.
+        BytesRefBlock whole = highlightWithIndexAnalyzer(
+            config("New York", 0, 0, 0),
+            Map.of(CONTENT_FIELD, new KeywordAnalyzer()),
+            new StandardAnalyzer(),
+            contentTerm("New York"),
+            "New York"
+        );
+        try {
+            assertThat(value(whole, 0), equalTo("<em>New York</em>"));
+        } finally {
+            whole.close();
+        }
+
+        BytesRefBlock subToken = highlightWithIndexAnalyzer(
+            config("York", 0, 0, 0),
+            Map.of(CONTENT_FIELD, new KeywordAnalyzer()),
+            new StandardAnalyzer(),
+            contentTerm("York"),
+            "New York"
+        );
+        try {
+            assertThat(subToken.isNull(0), equalTo(true));
+        } finally {
+            subToken.close();
+        }
+    }
+
+    public void testNamedAnalyzerLeavesComposeWithoutThrowing() {
+        // Regression for the composition trap: NamedAnalyzer and PerFieldAnalyzerWrapper are DelegatingAnalyzerWrappers
+        // and cannot be re-wrapped by LimitTokenOffsetAnalyzer. The operator must unwrap each NamedAnalyzer leaf (both
+        // per-field and default) before offset-limiting and composing, otherwise this throws at tokenStream(...).
+        NamedAnalyzer english = new NamedAnalyzer("english", AnalyzerScope.GLOBAL, new EnglishAnalyzer());
+        NamedAnalyzer standard = new NamedAnalyzer("standard", AnalyzerScope.GLOBAL, new StandardAnalyzer());
+        BytesRefBlock result = highlightWithIndexAnalyzer(
+            config("ring", 5, 0, 0),
+            Map.of(CONTENT_FIELD, english),
+            standard,
+            contentTerm("ring"),
+            "running rings"
+        );
+        try {
+            assertThat(value(result, 0), equalTo("running <em>rings</em>"));
         } finally {
             result.close();
         }
@@ -344,7 +453,7 @@ public class HighlightOperatorTests extends OperatorTestCase {
         try (
             HighlightOperator operator = new HighlightOperator(
                 blockFactory(),
-                config.withExecutionContext(new StandardAnalyzer(), query, CONTENT),
+                config.withExecutionContext(Map.of(), new StandardAnalyzer(), query, CONTENT),
                 new ExpressionEvaluator[] { new LoadFromPageEvaluator(0) }
             )
         ) {
@@ -356,19 +465,53 @@ public class HighlightOperatorTests extends OperatorTestCase {
         }
     }
 
-    // Runs the operator with one input block per ON field.
+    // Runs the operator with one input block per ON field, using the default analyzer for every field.
     private Page highlightFields(HighlightConfig config, Query query, List<String> fieldNames, BytesRefBlock... fields) {
+        return highlightFields(config, Map.of(), query, fieldNames, fields);
+    }
+
+    // Runs the operator with one input block per ON field, applying the given per-field index analyzers.
+    private Page highlightFields(
+        HighlightConfig config,
+        Map<String, Analyzer> indexAnalyzers,
+        Query query,
+        List<String> fieldNames,
+        BytesRefBlock... fields
+    ) {
         ExpressionEvaluator[] evaluators = IntStream.range(0, fields.length)
             .mapToObj(LoadFromPageEvaluator::new)
             .toArray(ExpressionEvaluator[]::new);
         try (
             HighlightOperator operator = new HighlightOperator(
                 blockFactory(),
-                config.withExecutionContext(new StandardAnalyzer(), query, fieldNames),
+                config.withExecutionContext(indexAnalyzers, new StandardAnalyzer(), query, fieldNames),
                 evaluators
             )
         ) {
             return operator.process(new Page(fields));
+        }
+    }
+
+    // Runs the operator over a single "content" field with an explicit per-field index analyzer.
+    private BytesRefBlock highlightWithIndexAnalyzer(
+        HighlightConfig config,
+        Map<String, Analyzer> indexAnalyzers,
+        Analyzer defaultAnalyzer,
+        Query query,
+        String text
+    ) {
+        try (
+            HighlightOperator operator = new HighlightOperator(
+                blockFactory(),
+                config.withExecutionContext(indexAnalyzers, defaultAnalyzer, query, CONTENT),
+                new ExpressionEvaluator[] { new LoadFromPageEvaluator(0) }
+            )
+        ) {
+            Page result = operator.process(new Page(bytesRefs(List.of(List.of(text)))));
+            BytesRefBlock highlighted = result.getBlock(result.getBlockCount() - 1);
+            highlighted.incRef();
+            result.releaseBlocks();
+            return highlighted;
         }
     }
 

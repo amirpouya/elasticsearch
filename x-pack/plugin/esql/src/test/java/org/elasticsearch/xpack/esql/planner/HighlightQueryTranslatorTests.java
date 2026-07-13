@@ -7,6 +7,7 @@
 
 package org.elasticsearch.xpack.esql.planner;
 
+import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.en.EnglishAnalyzer;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.index.Term;
@@ -33,6 +34,7 @@ import org.elasticsearch.xpack.esql.expression.predicate.logical.Or;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static org.elasticsearch.xpack.esql.EsqlTestUtils.TEST_CFG;
 import static org.elasticsearch.xpack.esql.EsqlTestUtils.getFieldAttribute;
@@ -52,6 +54,10 @@ public class HighlightQueryTranslatorTests extends ESTestCase {
 
     private static Query translate(Expression query, List<String> fields) {
         return HighlightQueryTranslator.translate(query, fields, new StandardAnalyzer());
+    }
+
+    private static Query translate(Expression query, List<String> fields, Map<String, Analyzer> searchAnalyzers) {
+        return HighlightQueryTranslator.translate(query, fields, searchAnalyzers, new StandardAnalyzer());
     }
 
     private static Query translateLiteral(String text) {
@@ -287,6 +293,33 @@ public class HighlightQueryTranslatorTests extends ESTestCase {
         BooleanClause mustNot = bq.clauses().stream().filter(c -> c.occur() == BooleanClause.Occur.MUST_NOT).findFirst().orElseThrow();
         assertThat(must.query(), instanceOf(MatchAllDocsQuery.class));
         assertThat(mustNot.query(), instanceOf(TermQuery.class));
+    }
+
+    // A field's own search analyzer tokenizes its MATCH query text: EnglishAnalyzer stems "running" to "run", whereas
+    // the default StandardAnalyzer would keep "running" verbatim.
+    public void testMatchUsesPerFieldSearchAnalyzer() {
+        Query query = translate(match("title", "running", null), TITLE, Map.of("title", new EnglishAnalyzer()));
+        assertThat(query, instanceOf(TermQuery.class));
+        assertThat(terms(query), containsInAnyOrder(new Term("title", "run")));
+    }
+
+    // A MATCH on a field absent from the per-field map falls back to the default analyzer (StandardAnalyzer keeps
+    // "running" unstemmed).
+    public void testMatchFallsBackToDefaultAnalyzer() {
+        Query query = translate(match("body", "running", null), TITLE_BODY, Map.of("title", new EnglishAnalyzer()));
+        assertThat(query, instanceOf(TermQuery.class));
+        assertThat(terms(query), containsInAnyOrder(new Term("body", "running")));
+    }
+
+    // The literal query_string path wraps the per-field analyzers in a PerFieldAnalyzerWrapper, so each field tokenizes
+    // the same text independently: title (English) stems to "run"; body (default Standard) keeps "running".
+    public void testLiteralHonorsPerFieldWrapper() {
+        BooleanQuery bq = asInstanceOf(BooleanQuery.class, translate(of("running"), TITLE_BODY, Map.of("title", new EnglishAnalyzer())));
+        assertThat(bq.clauses(), hasSize(2));
+        for (BooleanClause clause : bq.clauses()) {
+            assertThat(clause.occur(), equalTo(BooleanClause.Occur.SHOULD));
+        }
+        assertThat(terms(bq), containsInAnyOrder(new Term("title", "run"), new Term("body", "running")));
     }
 
     private static List<Term> terms(Query query) {
