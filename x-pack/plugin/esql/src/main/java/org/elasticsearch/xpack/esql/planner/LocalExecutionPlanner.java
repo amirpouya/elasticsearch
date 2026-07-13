@@ -106,6 +106,7 @@ import org.elasticsearch.transport.Transport;
 import org.elasticsearch.useragent.api.UserAgentParser;
 import org.elasticsearch.useragent.api.UserAgentParserRegistry;
 import org.elasticsearch.xpack.esql.EsqlIllegalArgumentException;
+import org.elasticsearch.xpack.esql.core.InvalidArgumentException;
 import org.elasticsearch.xpack.esql.core.expression.Alias;
 import org.elasticsearch.xpack.esql.core.expression.Attribute;
 import org.elasticsearch.xpack.esql.core.expression.Expression;
@@ -207,6 +208,7 @@ import org.elasticsearch.xpack.esql.score.ScoreMapper;
 import org.elasticsearch.xpack.esql.session.Configuration;
 import org.elasticsearch.xpack.esql.session.EsqlCCSUtils;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -1320,7 +1322,11 @@ public class LocalExecutionPlanner {
             throw new EsqlIllegalArgumentException("HIGHLIGHT requires an explicit query");
         }
         HighlightOptions options = HighlightOptions.from(highlight.options(), context.foldCtx());
-        Analyzer analyzer = Highlight.DEFAULT_ANALYZER;
+        // An explicit WITH { "analyzer": ... } option selects the analyzer used for both query tokenization and
+        // row-text re-analysis; without it, HIGHLIGHT uses the default analyzer for every ON field. An unknown name is
+        // rejected here (fail fast), matching Highlight#resolveVerificationAnalyzer.
+        Analyzer override = resolveHighlightAnalyzer(options.analyzerName(), context.analysisRegistry());
+        Analyzer analyzer = override != null ? override : Highlight.DEFAULT_ANALYZER;
         List<String> fieldNames = highlight.fields().stream().map(NamedExpression::name).toList();
 
         String literal = HighlightQueryTranslator.queryTextIfLiteral(queryExpr);
@@ -1338,6 +1344,7 @@ public class LocalExecutionPlanner {
             HighlightOptions.BOUNDARY_SCANNER_WORD.equals(options.boundaryScanner()),
             options.boundaryScannerLocale(),
             HighlightOptions.ORDER_SCORE.equals(options.order()),
+            options.analyzerName(),
             options.maxAnalyzedOffset()
         ).withExecutionContext(analyzer, query, fieldNames);
 
@@ -1353,6 +1360,31 @@ public class LocalExecutionPlanner {
         layoutBuilder.append(highlight.generatedFields());
 
         return source.with(new HighlightOperator.Factory(config, fieldEvaluators), layoutBuilder.build());
+    }
+
+    /**
+     * Resolves the HIGHLIGHT {@code analyzer} option to a single Lucene {@link Analyzer}, or {@code null} when the option
+     * is unset (the caller then uses the default analyzer for every field). An explicit option that cannot be resolved is
+     * a user error and is rejected, mirroring the fail-fast verification in {@code Highlight#resolveVerificationAnalyzer}.
+     * Only built-in (prebuilt) and globally-registered analyzers are resolvable — HIGHLIGHT runs on the coordinator
+     * without a target index's {@code IndexSettings}, so index-level custom analyzers are out of scope.
+     */
+    private static Analyzer resolveHighlightAnalyzer(@Nullable String analyzerName, @Nullable AnalysisRegistry analysisRegistry) {
+        if (analyzerName == null) {
+            return null;
+        }
+        if (analysisRegistry == null) {
+            throw new InvalidArgumentException("'analyzer' option cannot be resolved without an analysis registry");
+        }
+        try {
+            Analyzer analyzer = analysisRegistry.getAnalyzer(analyzerName);
+            if (analyzer != null) {
+                return analyzer;
+            }
+        } catch (IOException e) {
+            throw new InvalidArgumentException(e, "failed to load analyzer [{}]", analyzerName);
+        }
+        throw new InvalidArgumentException("'analyzer' must be a built-in or globally-registered analyzer, found [{}]", analyzerName);
     }
 
     private PhysicalOperation planHashJoin(HashJoinExec join, LocalExecutionPlannerContext context) {

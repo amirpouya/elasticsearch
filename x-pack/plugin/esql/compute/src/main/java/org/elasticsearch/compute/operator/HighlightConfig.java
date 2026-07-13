@@ -38,6 +38,8 @@ import java.util.Objects;
  * @param locale             locale used by the break iterator (the {@code boundary_scanner_locale} option).
  * @param orderByScore       when {@code true} fragments are returned by descending score instead of document order
  *                           (the {@code order=score} option).
+ * @param analyzerName       the user-supplied {@code analyzer} override, or {@code null} when unset (HIGHLIGHT then uses
+ *                           the default analyzer). Carried for describe/plan output only.
  * @param maxAnalyzedOffset  per-field analysis bound; a negative value means "use the default index setting" in the
  *                           current coordinator-side operator.
  * @param analyzer           analyzer used to build the per-row memory index and configure the unified highlighter.
@@ -55,6 +57,7 @@ public record HighlightConfig(
     boolean wordBoundary,
     Locale locale,
     boolean orderByScore,
+    String analyzerName,
     int maxAnalyzedOffset,
     Analyzer analyzer,
     Query query,
@@ -75,6 +78,7 @@ public record HighlightConfig(
         boolean wordBoundary,
         Locale locale,
         boolean orderByScore,
+        String analyzerName,
         int maxAnalyzedOffset
     ) {
         this(
@@ -88,6 +92,7 @@ public record HighlightConfig(
             wordBoundary,
             locale,
             orderByScore,
+            analyzerName,
             maxAnalyzedOffset,
             null,
             null,
@@ -111,6 +116,7 @@ public record HighlightConfig(
             wordBoundary,
             locale,
             orderByScore,
+            analyzerName,
             maxAnalyzedOffset,
             analyzer,
             query,
@@ -147,6 +153,8 @@ public record HighlightConfig(
             + locale
             + ", order_by_score="
             + orderByScore
+            + ", analyzer="
+            + analyzerName
             + ", max_analyzed_offset="
             + maxAnalyzedOffset;
     }

@@ -3314,9 +3314,10 @@ public class EsqlCapabilities {
         PROMQL_SUM_ON_HISTOGRAM,
 
         /**
-         * Support for the {@code HIGHLIGHT} command.
+         * Support for the {@code HIGHLIGHT} command, including the {@code WITH { "analyzer": ... }} option that selects a
+         * built-in or globally-registered analyzer for query tokenization and row-text re-analysis.
          */
-        HIGHLIGHT_V4(Build.current().isSnapshot()),
+        HIGHLIGHT_V5(Build.current().isSnapshot()),
 
         /**
          * Support for PromQL {@code histogram_quantile()} over classic histograms with {@code le} buckets.
