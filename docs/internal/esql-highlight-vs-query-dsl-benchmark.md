@@ -4,7 +4,8 @@ Design for a JMH benchmark that measures the per-document cost of the ES|QL `HIG
 command against Query DSL `unified` highlighting, on identical documents, queries, and
 options.
 
-Status: design approved, not yet implemented.
+Status: implemented in `benchmarks/src/main/java/org/elasticsearch/benchmark/esql/highlight/`.
+No results published yet; the full matrix has not been run.
 Date: 2026-07-28.
 
 ## 1. The question
