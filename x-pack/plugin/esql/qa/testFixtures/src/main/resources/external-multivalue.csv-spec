@@ -229,6 +229,25 @@ book_no:keyword|title:keyword                        |description:keyword       
 9607           |Beowolf: The monsters and the critics|A collection of seven essays by J.R.R. Tolkien arising out of Tolkien's work in medieval literature|0.0
 ;
 
+// HIGHLIGHT over a dataset:
+highlightFunctionOnDataset
+required_capability: dataset_in_from_command
+required_capability: highlight_v6
+required_capability: datasource_file_readers_no_text_type
+dataset: books_ds: "{{books}}"
+
+FROM books_ds
+| WHERE book_no::INTEGER IN (2714, 7350)
+| HIGHLIGHT "return" ON title
+| KEEP book_no, highlight_title
+| SORT book_no
+;
+
+book_no:keyword | highlight_title:keyword
+2714            | <em>Return</em> of the King Being the Third Part of The Lord of the Rings
+7350            | <em>Return</em> of the Shadow
+;
+
 // mv_like / mv_rlike over a dataset: FROM <dataset> has no Lucene index, so the predicate runs on the
 // compute-engine evaluator — the path these functions take in production for datasets, exercised here
 // across every native-array format reader. Must agree with the index-backed mvLikeField/mvRLikeField
