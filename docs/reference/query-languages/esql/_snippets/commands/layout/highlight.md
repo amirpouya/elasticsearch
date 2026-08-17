@@ -19,7 +19,7 @@ HIGHLIGHT [prefix = "<prefix>"] query ON field [, field, ...] [WITH { "option": 
 `prefix`
 :   (Optional) String literal used to name the generated columns. Each highlighted
     field is written to `<prefix><field>`. Defaults to `highlight_`, so
-    `HIGHLIGHT "fox" ON content` produces `highlight_content`. If a generated name
+    `HIGHLIGHT "ring" ON content` produces `highlight_content`. If a generated name
     collides with an existing column, the highlight column replaces it. Set an
     empty prefix (`prefix = ""`) to overwrite the source column in place instead
     of adding a new one.
@@ -33,8 +33,9 @@ HIGHLIGHT [prefix = "<prefix>"] query ON field [, field, ...] [WITH { "option": 
     [`QSTR`](/reference/query-languages/esql/functions-operators/search-functions/qstr.md),
     or [`KQL`](/reference/query-languages/esql/functions-operators/search-functions/kql.md),
     or the [match operator](/reference/query-languages/esql/functions-operators/operators.md#esql-match-operator) `:`.
-    You can combine full-text functions with `AND`, `OR`, and `NOT`. The field
-    targeted by `MATCH`, `MATCH_PHRASE`, or the match operator must be listed in
+    You can combine full-text functions with `AND`, `OR`, and `NOT`. In string, `QSTR`, and `KQL` queries, use field-scoped syntax such as
+    `author:tolkien` to target a field. The field
+    targeted by match operator must be listed in
     `ON`.
 
 `field`
@@ -98,16 +99,13 @@ HIGHLIGHT [prefix = "<prefix>"] query ON field [, field, ...] [WITH { "option": 
     `index.highlight.max_analyzed_offset` index setting. Matches after this
     offset are not highlighted.
 
-`boundary_chars`, `boundary_max_scan`, `phrase_limit`
-:   (Optional) Accepted for compatibility with the
-    [`_search` API's highlight options](/reference/elasticsearch/rest-apis/highlighting.md),
-    but do not affect the result. They apply only to the fast vector highlighter,
-    while `HIGHLIGHT` always uses the unified highlighter.
-
-Other `_search` highlight options, such as `require_field_match`,
-`matched_fields`, or `tags_schema`, are not supported and are rejected as
-unknown options. `HIGHLIGHT` always behaves as if `require_field_match` were
-`true`: only fields the query targets are highlighted.
+Other [`_search` API highlight options](/reference/elasticsearch/rest-apis/highlighting.md)
+are not supported and are rejected as unknown options. This includes
+`require_field_match`, `matched_fields`, and `tags_schema`, as well as
+`boundary_chars`, `boundary_max_scan`, and `phrase_limit` — the last three apply
+only to the fast vector highlighter, while `HIGHLIGHT` always uses the unified
+highlighter. `HIGHLIGHT` always behaves as if `require_field_match` were `true`:
+only fields the query targets are highlighted.
 
 ## Description
 
@@ -154,31 +152,33 @@ its behavior may change in future releases. Current limitations include:
 Wrap the matching term in the default `<em>` tags:
 
 ```esql
-ROW content = "The quick brown fox jumps over the lazy dog."
-| HIGHLIGHT "fox" ON content
+ROW content = "Not all those who wander are lost."
+| HIGHLIGHT "wander" ON content
 | KEEP highlight_content
 ```
 
 | highlight_content:keyword |
 | --- |
-| `The quick brown <em>fox</em> jumps over the lazy dog.` |
+| `Not all those who <em>wander</em> are lost.` |
 
 ### Highlight the results of a full-text search
 
-Use `MATCH` to filter rows, then highlight the matching field:
+Filter and rank the rows before highlighting them. This limits the work
+`HIGHLIGHT` performs to the final result set:
 
 ```esql
-FROM books
+FROM books METADATA _score
 | WHERE MATCH(title, "Return")
+| SORT _score DESC, book_no ASC
+| LIMIT 2
 | HIGHLIGHT "return" ON title
 | KEEP book_no, highlight_title
-| SORT book_no
 ```
 
 | book_no:keyword | highlight_title:keyword |
 | --- | --- |
-| 2714 | `<em>Return</em> of the King Being the Third Part of The Lord of the Rings` |
 | 7350 | `<em>Return</em> of the Shadow` |
+| 2714 | `<em>Return</em> of the King Being the Third Part of The Lord of the Rings` |
 
 ### Use a full-text function as the query
 
@@ -198,33 +198,72 @@ FROM books
 | 2714 | `<em>Return of the</em> King Being the Third Part of The Lord of the Rings` |
 | 7350 | `<em>Return of the</em> Shadow` |
 
-### Customize the highlight tags
+### Highlight multiple fields
 
-Use `pre_tags` and `post_tags` to change the wrapping tags:
+List multiple fields in `ON` to create a highlight column for each field. This
+example uses `QSTR` to target each field explicitly:
 
 ```esql
-ROW content = "The quick brown fox jumps over the lazy dog."
-| HIGHLIGHT "fox" ON content WITH { "pre_tags": ["<b>"], "post_tags": ["</b>"] }
+ROW title = "The Bridge of Khazad-dûm", body = "You cannot pass!"
+| HIGHLIGHT QSTR("title:bridge OR body:pass") ON title, body
+| KEEP highlight_title, highlight_body
+```
+
+| highlight_title:keyword | highlight_body:keyword |
+| --- | --- |
+| `The <em>Bridge</em> of Khazad-dûm` | `You cannot <em>pass</em>!` |
+
+### Set the analyzer
+
+Use the `analyzer` option when the query and field text require analysis other
+than the default `standard` analyzer. Here, the `english` analyzer stems `Rings`
+to match `ring`:
+
+```esql
+ROW title = "The Lord of the Rings"
+| HIGHLIGHT "ring" ON title WITH { "analyzer": "english" }
+| KEEP highlight_title
+```
+
+| highlight_title:keyword |
+| --- |
+| `The Lord of the <em>Rings</em>` |
+
+Without the `analyzer` option, this query returns `null` because the `standard`
+analyzer does not stem `Rings`.
+
+### Customize tags and encode HTML
+
+Use `pre_tags` and `post_tags` to change the wrapping tags. Set `encoder` to
+`html` to escape HTML in the field value:
+
+```esql
+ROW content = "<b>Not all</b> those who wander are lost."
+| HIGHLIGHT "wander" ON content WITH {
+    "pre_tags": ["<strong>"],
+    "post_tags": ["</strong>"],
+    "encoder": "html"
+  }
 | KEEP highlight_content
 ```
 
 | highlight_content:keyword |
 | --- |
-| `The quick brown <b>fox</b> jumps over the lazy dog.` |
+| `&lt;b&gt;Not all&lt;&#x2F;b&gt; those who <strong>wander</strong> are lost.` |
 
 ### Name the output column with a prefix
 
 A non-empty `prefix` keeps the source column and adds a `<prefix><field>` column:
 
 ```esql
-ROW content = "The One Ring was forged by Sauron."
-| HIGHLIGHT prefix = "hl_" "ring" ON content
+ROW content = "Deeds will not be less valiant because they are unpraised."
+| HIGHLIGHT prefix = "hl_" "valiant" ON content
 | KEEP content, hl_content
 ```
 
 | content:keyword | hl_content:keyword |
 | --- | --- |
-| The One Ring was forged by Sauron. | `The One <em>Ring</em> was forged by Sauron.` |
+| Deeds will not be less valiant because they are unpraised. | `Deeds will not be less <em>valiant</em> because they are unpraised.` |
 
 ### Return leading text when nothing matches
 
@@ -232,25 +271,29 @@ By default, a field with no match returns `null`. Set `no_match_size` to return
 the beginning of the field instead:
 
 ```esql
-ROW content = "Gardens and flowers bloom in spring."
-| HIGHLIGHT "elasticsearch" ON content WITH { "no_match_size": 200 }
+ROW content = "Courage is found in unlikely places."
+| HIGHLIGHT "Mordor" ON content WITH { "no_match_size": 200 }
 | KEEP highlight_content
 ```
 
 | highlight_content:keyword |
 | --- |
-| Gardens and flowers bloom in spring. |
+| Courage is found in unlikely places. |
 
-### Order fragments by score
+### Highlight multivalued fields and order fragments by score
 
-With `order` set to `score`, the highest-scoring fragments come first:
+`HIGHLIGHT` returns a multivalued result when more than one value matches. With
+`order` set to `score`, the fragment with more matches comes first:
 
 ```esql
-ROW content = ["fast search", "fast and fast results"]
-| HIGHLIGHT "fast" ON content WITH { "order": "score" }
-| KEEP highlight_content
+ROW verse = [
+  "One Ring to rule them all",
+  "One Ring to find them, One Ring to bring them all"
+]
+| HIGHLIGHT "ring" ON verse WITH { "order": "score" }
+| KEEP highlight_verse
 ```
 
-| highlight_content:keyword |
+| highlight_verse:keyword |
 | --- |
-| `[<em>fast</em> and <em>fast</em> results, <em>fast</em> search]` |
+| `[One <em>Ring</em> to find them, One <em>Ring</em> to bring them all, One <em>Ring</em> to rule them all]` |
