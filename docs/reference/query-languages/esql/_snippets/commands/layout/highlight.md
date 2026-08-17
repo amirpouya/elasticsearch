@@ -5,8 +5,8 @@ serverless: preview
 
 The `HIGHLIGHT` command runs a full-text query against one or more fields. For
 each row, it adds a column containing the field text with matching terms wrapped
-in highlight tags. It provides the same kind of highlighting as the
-[`_search` API](/reference/elasticsearch/rest-apis/highlighting.md) in {{esql}}.
+in highlight tags, similar to [`_search` API highlighting](/reference/elasticsearch/rest-apis/highlighting.md).
+See the limitations below for where the two differ.
 
 ## Syntax
 
@@ -33,10 +33,11 @@ HIGHLIGHT [prefix = "<prefix>"] query ON field [, field, ...] [WITH { "option": 
     [`QSTR`](/reference/query-languages/esql/functions-operators/search-functions/qstr.md),
     or [`KQL`](/reference/query-languages/esql/functions-operators/search-functions/kql.md),
     or the [match operator](/reference/query-languages/esql/functions-operators/operators.md#esql-match-operator) `:`.
-    You can combine full-text functions with `AND`, `OR`, and `NOT`. In string, `QSTR`, and `KQL` queries, use field-scoped syntax such as
-    `author:tolkien` to target a field. The field
-    targeted by match operator must be listed in
-    `ON`.
+    You can combine full-text functions with `AND`, `OR`, and `NOT`. A negated
+    query is accepted but does not wrap any terms. Every field named by the query
+    must be listed in `ON`. That includes fields targeted by `MATCH`,
+    `MATCH_PHRASE`, or the match operator, and field-scoped terms such as
+    `author:tolkien` in a string, `QSTR`, or `KQL` query.
 
 `field`
 :   One or more columns to highlight. Each field must be `text` or `keyword`.
@@ -99,6 +100,7 @@ HIGHLIGHT [prefix = "<prefix>"] query ON field [, field, ...] [WITH { "option": 
     `index.highlight.max_analyzed_offset` index setting. Matches after this
     offset are not highlighted.
 
+:::{note}
 Other [`_search` API highlight options](/reference/elasticsearch/rest-apis/highlighting.md)
 are not supported and are rejected as unknown options. This includes
 `require_field_match`, `matched_fields`, and `tags_schema`, as well as
@@ -106,6 +108,7 @@ are not supported and are rejected as unknown options. This includes
 only to the fast vector highlighter, while `HIGHLIGHT` always uses the unified
 highlighter. `HIGHLIGHT` always behaves as if `require_field_match` were `true`:
 only fields the query targets are highlighted.
+:::
 
 ## Description
 
@@ -115,11 +118,11 @@ column per field, named `highlight_<field>` by default. Fields with no match
 return `null`. If `no_match_size` is greater than `0`, they return the beginning
 of the field instead.
 
-A multivalued field is highlighted as one continuous text, and the resulting
-fragments are returned as a multivalued column value. Multivalued `keyword`
-fields are loaded from doc values — sorted and deduplicated — so fragments can
-differ in order from the `_search` API, which highlights values in their
-original `_source` order.
+A multivalued field is highlighted one value at a time. Phrase matches and
+fragments cannot cross value boundaries. Matching values are returned as a
+multivalued column. Multivalued `keyword` fields are loaded from doc values —
+sorted and deduplicated — so fragments can differ in order from the `_search`
+API, which highlights values in their original `_source` order.
 
 Use `HIGHLIGHT` after a full-text `WHERE` filter to show *why* a document
 matched, as you would with post-fetch highlighting in the `_search` API.
