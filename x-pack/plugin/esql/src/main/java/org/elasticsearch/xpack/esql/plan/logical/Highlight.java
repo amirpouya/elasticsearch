@@ -12,6 +12,7 @@ import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.lucene.BytesRefs;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.index.analysis.AnalysisRegistry;
 import org.elasticsearch.index.analysis.NamedAnalyzer;
 import org.elasticsearch.xpack.esql.capabilities.PostAnalysisVerificationAware;
@@ -31,6 +32,9 @@ import org.elasticsearch.xpack.esql.core.expression.ReferenceAttribute;
 import org.elasticsearch.xpack.esql.core.tree.NodeInfo;
 import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
+import org.elasticsearch.xpack.esql.core.type.EsField;
+import org.elasticsearch.xpack.esql.core.type.TextEsField;
+import org.elasticsearch.xpack.esql.core.util.CollectionUtils;
 import org.elasticsearch.xpack.esql.io.stream.PlanStreamInput;
 import org.elasticsearch.xpack.esql.plan.GeneratingPlan;
 import org.elasticsearch.xpack.esql.plan.logical.highlight.HighlightAnalyzers;
@@ -112,6 +116,16 @@ public class Highlight extends UnaryPlan
     private final MapExpression options;
     /** Generated {@code <prefix><field>} attributes, appended in ON-field order. */
     private final List<Attribute> generatedFields;
+    /**
+     * The {@code _index} column of each row, set by the analyzer when the queried indices disagree on an ON field's
+     * analyzer so each row can be highlighted with its own index's analyzer. {@code null} otherwise.
+     */
+    private final @Nullable Attribute indexKey;
+    /**
+     * The mapping of each ON column that FORK or UNION ALL merged from mapped text fields, by name: the merged column is a
+     * {@link ReferenceAttribute}, which does not carry it. Set by the analyzer, empty otherwise.
+     */
+    private final Map<String, TextEsField> fieldMappings;
 
     public Highlight(
         Source source,
@@ -122,7 +136,9 @@ public class Highlight extends UnaryPlan
         boolean derivedFields,
         List<NamedExpression> fields,
         MapExpression options,
-        List<Attribute> generatedFields
+        List<Attribute> generatedFields,
+        @Nullable Attribute indexKey,
+        Map<String, TextEsField> fieldMappings
     ) {
         super(source, child);
         this.prefix = prefix;
@@ -132,6 +148,8 @@ public class Highlight extends UnaryPlan
         this.fields = fields;
         this.options = options;
         this.generatedFields = generatedFields;
+        this.indexKey = indexKey;
+        this.fieldMappings = fieldMappings;
     }
 
     private Highlight(StreamInput in) throws IOException {
@@ -145,7 +163,11 @@ public class Highlight extends UnaryPlan
             in.readNamedWriteableCollectionAsList(NamedExpression.class),
             // MapExpression is registered under the Expression category, not its own, so read it as an Expression.
             (MapExpression) in.readOptionalNamedWriteable(Expression.class),
-            in.readNamedWriteableCollectionAsList(Attribute.class)
+            in.readNamedWriteableCollectionAsList(Attribute.class),
+            in.getTransportVersion().supports(ESQL_HIGHLIGHT_IMPLICIT_QUERY_AND_FIELDS)
+                ? in.readOptionalNamedWriteable(Attribute.class)
+                : null,
+            in.getTransportVersion().supports(ESQL_HIGHLIGHT_IMPLICIT_QUERY_AND_FIELDS) ? in.readImmutableMap(EsField::readFrom) : Map.of()
         );
     }
 
@@ -171,6 +193,11 @@ public class Highlight extends UnaryPlan
         out.writeNamedWriteableCollection(fields);
         out.writeOptionalNamedWriteable(options);
         out.writeNamedWriteableCollection(generatedFields);
+        if (out.getTransportVersion().supports(ESQL_HIGHLIGHT_IMPLICIT_QUERY_AND_FIELDS)) {
+            // The analyzer only sets the key and the mappings when every node supports this version.
+            out.writeOptionalNamedWriteable(indexKey);
+            out.writeMap(fieldMappings, (o, mapping) -> mapping.writeTo(o));
+        }
     }
 
     @Override
@@ -202,6 +229,19 @@ public class Highlight extends UnaryPlan
         return options;
     }
 
+    public Attribute indexKey() {
+        return indexKey;
+    }
+
+    public Map<String, TextEsField> fieldMappings() {
+        return fieldMappings;
+    }
+
+    /** Whether WITH sets {@code analyzer}, which then applies to every row instead of each field's mapping analyzer. */
+    public boolean hasAnalyzerOption() {
+        return options != null && options.get(ANALYZER) != null;
+    }
+
     public static List<String> validOptionNames() {
         return VALID_OPTION_NAMES;
     }
@@ -223,7 +263,19 @@ public class Highlight extends UnaryPlan
         MapExpression options,
         List<Attribute> generatedFields
     ) {
-        return new Highlight(source(), child, prefix, query, implicitQuery, derivedFields, fields, options, generatedFields);
+        return new Highlight(
+            source(),
+            child,
+            prefix,
+            query,
+            implicitQuery,
+            derivedFields,
+            fields,
+            options,
+            generatedFields,
+            indexKey,
+            fieldMappings
+        );
     }
 
     public Highlight withOptions(MapExpression newOptions) {
@@ -231,6 +283,24 @@ public class Highlight extends UnaryPlan
             return this;
         }
         return copy(child(), query, fields, newOptions, generatedFields);
+    }
+
+    /** A non-null {@code key} must be in {@code newChild}'s output. */
+    public Highlight withIndexKeyAndMappings(LogicalPlan newChild, @Nullable Attribute key, Map<String, TextEsField> newFieldMappings) {
+        assert key == null || newChild.outputSet().contains(key) : "HIGHLIGHT index key must be in the child output";
+        return new Highlight(
+            source(),
+            newChild,
+            prefix,
+            query,
+            implicitQuery,
+            derivedFields,
+            fields,
+            options,
+            generatedFields,
+            key,
+            newFieldMappings
+        );
     }
 
     /**
@@ -243,7 +313,19 @@ public class Highlight extends UnaryPlan
         List<NamedExpression> newFields,
         List<Attribute> newGeneratedFields
     ) {
-        return new Highlight(source(), child(), prefix, newQuery, newImplicitQuery, derivedFields, newFields, options, newGeneratedFields);
+        return new Highlight(
+            source(),
+            child(),
+            prefix,
+            newQuery,
+            newImplicitQuery,
+            derivedFields,
+            newFields,
+            options,
+            newGeneratedFields,
+            indexKey,
+            fieldMappings
+        );
     }
 
     /**
@@ -270,7 +352,9 @@ public class Highlight extends UnaryPlan
             derivedFields,
             fields,
             options,
-            generatedFields
+            generatedFields,
+            indexKey,
+            fieldMappings
         );
     }
 
@@ -298,8 +382,8 @@ public class Highlight extends UnaryPlan
 
     @Override
     protected AttributeSet computeReferences() {
-        // Only the ON fields are inputs; the generated <prefix><field> columns are outputs, not references.
-        return Expressions.references(fields);
+        // The ON fields and the index key are inputs; the generated <prefix><field> columns are outputs, not references.
+        return Expressions.references(indexKey == null ? fields : CollectionUtils.combine(fields, indexKey));
     }
 
     @Override
@@ -376,16 +460,25 @@ public class Highlight extends UnaryPlan
     private void verifyQuery(String commandAnalyzerName, Failures failures, AnalysisRegistry analysisRegistry, Consumer<String> warnings) {
         try {
             // TO_TEXT declarations may not have been verified yet.
-            Map<String, NamedAnalyzer> fieldAnalyzers = HighlightAnalyzers.resolve(fields, commandAnalyzerName, analysisRegistry, warnings);
+            HighlightAnalyzers.Resolved resolved = HighlightAnalyzers.resolve(
+                fields,
+                fieldMappings,
+                commandAnalyzerName,
+                analysisRegistry,
+                indexKey != null,
+                warnings
+            );
             // Enforce ON membership only when the query and field list are both explicit. An implicit query
             // treats a field outside ON as match-none instead of failing.
-            HighlightQueryBuilders.verify(
-                query,
-                fieldAnalyzers,
-                implicitQuery == false && derivedFields == false,
-                implicitQuery,
-                analysisRegistry
-            );
+            for (Map<String, NamedAnalyzer> fieldAnalyzers : resolved.analysisGroups()) {
+                HighlightQueryBuilders.verify(
+                    query,
+                    fieldAnalyzers,
+                    implicitQuery == false && derivedFields == false,
+                    implicitQuery,
+                    analysisRegistry
+                );
+            }
         } catch (InvalidArgumentException | IllegalArgumentException e) {
             // Attach to the query node, not this Highlight node: failures dedupe by node, so pinning it here would let a
             // co-located option/analyzer failure on this node swallow the query error (see VerifierTests#testHighlightAnalyzerOption).
@@ -471,11 +564,24 @@ public class Highlight extends UnaryPlan
             && derivedFields == other.derivedFields
             && Objects.equals(fields, other.fields)
             && Objects.equals(options, other.options)
-            && Objects.equals(generatedFields, other.generatedFields);
+            && Objects.equals(generatedFields, other.generatedFields)
+            && Objects.equals(indexKey, other.indexKey)
+            && Objects.equals(fieldMappings, other.fieldMappings);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(super.hashCode(), prefix, query, implicitQuery, derivedFields, fields, options, generatedFields);
+        return Objects.hash(
+            super.hashCode(),
+            prefix,
+            query,
+            implicitQuery,
+            derivedFields,
+            fields,
+            options,
+            generatedFields,
+            indexKey,
+            fieldMappings
+        );
     }
 }

@@ -33,6 +33,7 @@ import org.apache.lucene.search.TermRangeQuery;
 import org.apache.lucene.search.WildcardQuery;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.CharsRef;
+import org.elasticsearch.compute.data.Block;
 import org.elasticsearch.compute.data.BlockFactory;
 import org.elasticsearch.compute.data.BytesRefBlock;
 import org.elasticsearch.compute.data.IntBlock;
@@ -51,9 +52,12 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
 
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.notNullValue;
@@ -83,7 +87,7 @@ public class HighlightOperatorTests extends OperatorTestCase {
             contentTerm("fox"),
             CONTENT
         );
-        return new HighlightOperator.Factory(config, List.of(new LoadFromPageEvaluator.Factory(0)));
+        return new HighlightOperator.Factory(config, List.of(new LoadFromPageEvaluator.Factory(0)), null);
     }
 
     @Override
@@ -98,7 +102,7 @@ public class HighlightOperatorTests extends OperatorTestCase {
     @Override
     protected Matcher<String> expectedToStringOfSimple() {
         return equalTo(
-            "HighlightOperator[query=content:fox, query=fox, pre_tag=<em>, post_tag=</em>, encoder=default, number_of_fragments=5, "
+            "HighlightOperator[lucene_queries=[content:fox], query=fox, pre_tag=<em>, post_tag=</em>, encoder=default, number_of_fragments=5, "
                 + "fragment_size=0, no_match_size=0, word_boundary=false, locale=, order_by_score=false, analyzer=StandardAnalyzer, "
                 + "max_analyzed_offset=-1, fields=[Attribute[channel=0]]]"
         );
@@ -399,7 +403,8 @@ public class HighlightOperatorTests extends OperatorTestCase {
             HighlightOperator operator = new HighlightOperator(
                 blockFactory(),
                 config("fox", 5, 0, 0).withExecutionContext(namedAnalyzers(analyzer, CONTENT.size()), contentTerm("fox"), CONTENT),
-                new ExpressionEvaluator[] { new LoadFromPageEvaluator(0) }
+                new ExpressionEvaluator[] { new LoadFromPageEvaluator(0) },
+                null
             )
         ) {
             IntBlock intBlock = blockFactory().newConstantIntBlockWith(1, 1);
@@ -718,6 +723,88 @@ public class HighlightOperatorTests extends OperatorTestCase {
         }
     }
 
+    /**
+     * Each row is analyzed and searched the way its own index does: the english group stems {@code Ring} and
+     * carries the query translated with that analyzer ({@code ring}), the standard one keeps {@code Ring} and queries
+     * {@code rings}. Rows with a null or unknown {@code _index} use the first group.
+     */
+    public void testPerIndexAnalysisGroups() {
+        HighlightConfig config = perIndexConfig();
+        assertThat(config.describe(), containsString("analyzer=StandardAnalyzer, per_index_analyzer=[EnglishAnalyzer=[books_english]]"));
+        BytesRefBlock content = bytesRefs(
+            List.of(List.of("Lord of the Ring"), List.of("Lord of the Ring"), List.of("Lord of the Ring"), List.of("Lord of the Rings"))
+        );
+        BytesRefBlock index = bytesRefsOrNull(Arrays.asList("books", "books_english", null, "unknown"));
+        try (
+            HighlightOperator operator = new HighlightOperator(
+                blockFactory(),
+                config,
+                new ExpressionEvaluator[] { new LoadFromPageEvaluator(0) },
+                new LoadFromPageEvaluator(1)
+            )
+        ) {
+            Page result = operator.process(new Page(content, index));
+            try {
+                BytesRefBlock highlighted = result.getBlock(2);
+                assertThat(highlighted.isNull(0), equalTo(true));
+                assertThat(value(highlighted, 1), equalTo("Lord of the <em>Ring</em>"));
+                assertThat(highlighted.isNull(2), equalTo(true));
+                assertThat(value(highlighted, 3), equalTo("Lord of the <em>Rings</em>"));
+            } finally {
+                result.releaseBlocks();
+            }
+        }
+    }
+
+    /** The operator the factory builds reads each row's group off the {@code _index} evaluator, and releases it on close. */
+    public void testFactoryWiresAndClosesIndexEvaluator() {
+        AtomicBoolean indexEvaluatorClosed = new AtomicBoolean();
+        ExpressionEvaluator.Factory indexEvaluatorFactory = context -> new ExpressionEvaluator() {
+            @Override
+            public Block eval(Page page) {
+                return new LoadFromPageEvaluator(1).eval(page);
+            }
+
+            @Override
+            public long baseRamBytesUsed() {
+                return 0;
+            }
+
+            @Override
+            public void close() {
+                indexEvaluatorClosed.set(true);
+            }
+        };
+        HighlightOperator.Factory factory = new HighlightOperator.Factory(
+            perIndexConfig(),
+            List.of(new LoadFromPageEvaluator.Factory(0)),
+            indexEvaluatorFactory
+        );
+        BytesRefBlock content = bytesRefs(List.of(List.of("Lord of the Ring")));
+        BytesRefBlock index = bytesRefsOrNull(List.of("books_english"));
+        try (HighlightOperator operator = (HighlightOperator) factory.get(driverContext())) {
+            Page result = operator.process(new Page(content, index));
+            try {
+                assertThat(value(result.getBlock(2), 0), equalTo("Lord of the <em>Ring</em>"));
+            } finally {
+                result.releaseBlocks();
+            }
+        }
+        assertTrue(indexEvaluatorClosed.get());
+    }
+
+    /** {@code books_english} rows use an english analyzer and query, every other row the standard ones. */
+    private static HighlightConfig perIndexConfig() {
+        return config("rings", 5, 0, 0).withExecutionContext(
+            List.of(
+                new HighlightConfig.AnalysisGroup(namedAnalyzers(new StandardAnalyzer(), 1), contentTerm("rings")),
+                new HighlightConfig.AnalysisGroup(namedAnalyzers(new EnglishAnalyzer(), 1), contentTerm("ring"))
+            ),
+            Map.of("books_english", 1),
+            CONTENT
+        );
+    }
+
     private static Query contentTerm(String term) {
         return termQuery(CONTENT_FIELD, term);
     }
@@ -774,7 +861,8 @@ public class HighlightOperatorTests extends OperatorTestCase {
             HighlightOperator operator = new HighlightOperator(
                 blockFactory(),
                 config.withExecutionContext(namedAnalyzers(analyzer, CONTENT.size()), query, CONTENT),
-                new ExpressionEvaluator[] { new LoadFromPageEvaluator(0) }
+                new ExpressionEvaluator[] { new LoadFromPageEvaluator(0) },
+                null
             )
         ) {
             Page result = operator.process(new Page(input));
@@ -804,7 +892,8 @@ public class HighlightOperatorTests extends OperatorTestCase {
             HighlightOperator operator = new HighlightOperator(
                 blockFactory(),
                 config.withExecutionContext(fieldAnalyzers, query, fieldNames),
-                evaluators
+                evaluators,
+                null
             )
         ) {
             return operator.process(new Page(fields));

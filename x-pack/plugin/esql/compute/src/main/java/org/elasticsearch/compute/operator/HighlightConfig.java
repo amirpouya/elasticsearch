@@ -12,7 +12,10 @@ import org.elasticsearch.index.analysis.NamedAnalyzer;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -22,8 +25,8 @@ import java.util.stream.IntStream;
  * It contains two groups of values:
  * <ul>
  *     <li>user-facing highlight options resolved from {@code WITH { ... }}</li>
- *     <li>execution context (per-field {@link NamedAnalyzer}s, translated {@link Query}, and target field names)
- *     attached during planning via {@link #withExecutionContext(List, Query, List)}</li>
+ *     <li>execution context (per-field {@link NamedAnalyzer}s and translated {@link Query} per {@link AnalysisGroup}, and
+ *     target field names) attached during planning via {@link #withExecutionContext(List, Map, List)}</li>
  * </ul>
  * Keeping this record in the compute module (rather than referencing the ES|QL planning-layer options type) keeps
  * operator wiring localized to the compute package.
@@ -44,9 +47,10 @@ import java.util.stream.IntStream;
  *                           its mapping analyzer, a TO_TEXT declaration, or {@code standard}.
  * @param maxAnalyzedOffset  per-field analysis bound; a negative value means "use the default index setting" in the
  *                           current coordinator-side operator.
- * @param fieldAnalyzers     the analyzer each ON field is analyzed and searched with, aligned by index with
- *                           {@code fieldNames}. Fields can use different analyzers.
- * @param query              translated Lucene query used for matching and snippet extraction.
+ * @param analysisGroups     analyzers and query per combination of analyzers some row needs. Rows use
+ *                           {@code analysisGroups.getFirst()} unless {@code groupByIndex} says otherwise.
+ * @param groupByIndex       {@code _index} value to the position in {@code analysisGroups} its rows use. Empty when
+ *                           every row shares the first group.
  * @param fieldNames         highlighted field names, in the same order as field evaluators.
  */
 public record HighlightConfig(
@@ -62,13 +66,27 @@ public record HighlightConfig(
     boolean orderByScore,
     String analyzerName,
     int maxAnalyzedOffset,
-    List<NamedAnalyzer> fieldAnalyzers,
-    Query query,
+    List<AnalysisGroup> analysisGroups,
+    Map<String, Integer> groupByIndex,
     List<String> fieldNames
 ) {
 
     /** Encoder name that escapes HTML markup in the highlighted text; any other value uses the default (no escaping). */
     public static final String HTML_ENCODER = "html";
+
+    /** Caps the indices {@link #describe()} names per analysis group, as there can be thousands. */
+    private static final int MAX_DESCRIBED_INDICES = 3;
+
+    /**
+     * The analyzer each ON field is analyzed and searched with, aligned by index with {@link #fieldNames}, and the
+     * Lucene query translated with those analyzers. Indices that analyze every ON field the same way share one group.
+     */
+    public record AnalysisGroup(List<NamedAnalyzer> fieldAnalyzers, Query query) {
+        public AnalysisGroup {
+            fieldAnalyzers = List.copyOf(fieldAnalyzers);
+            Objects.requireNonNull(query, "HIGHLIGHT query must be set in execution context");
+        }
+    }
 
     public HighlightConfig(
         String queryText,
@@ -98,17 +116,28 @@ public record HighlightConfig(
             analyzerName,
             maxAnalyzedOffset,
             List.of(),
-            null,
+            Map.of(),
             List.of()
         );
     }
 
     public HighlightConfig {
-        fieldAnalyzers = List.copyOf(fieldAnalyzers);
+        analysisGroups = List.copyOf(analysisGroups);
+        groupByIndex = Map.copyOf(groupByIndex);
         fieldNames = List.copyOf(fieldNames);
     }
 
+    /** Single-group shorthand: every row uses {@code fieldAnalyzers} and {@code query}. */
     public HighlightConfig withExecutionContext(List<NamedAnalyzer> fieldAnalyzers, Query query, List<String> fieldNames) {
+        return withExecutionContext(List.of(new AnalysisGroup(fieldAnalyzers, query)), Map.of(), fieldNames);
+    }
+
+    /** Multi-group form: {@code groupByIndex} maps an {@code _index} value to the position in {@code analysisGroups} its rows use. */
+    public HighlightConfig withExecutionContext(
+        List<AnalysisGroup> analysisGroups,
+        Map<String, Integer> groupByIndex,
+        List<String> fieldNames
+    ) {
         return new HighlightConfig(
             queryText,
             preTag,
@@ -122,21 +151,17 @@ public record HighlightConfig(
             orderByScore,
             analyzerName,
             maxAnalyzedOffset,
-            fieldAnalyzers,
-            query,
+            analysisGroups,
+            groupByIndex,
             fieldNames
         );
     }
 
-    public List<NamedAnalyzer> requiredFieldAnalyzers() {
-        if (fieldAnalyzers.isEmpty()) {
+    public List<AnalysisGroup> requiredAnalysisGroups() {
+        if (analysisGroups.isEmpty()) {
             throw new IllegalStateException("HIGHLIGHT field analyzers must be set in execution context");
         }
-        return fieldAnalyzers;
-    }
-
-    public Query requiredQuery() {
-        return Objects.requireNonNull(query, "HIGHLIGHT query must be set in execution context");
+        return analysisGroups;
     }
 
     public String describe() {
@@ -161,22 +186,42 @@ public record HighlightConfig(
             + ", order_by_score="
             + orderByScore
             + ", analyzer="
-            + describeAnalyzers()
+            + (analysisGroups.isEmpty() ? analyzerName : describeAnalyzers(analysisGroups.getFirst()))
+            + describePerIndexAnalyzers()
             + ", max_analyzed_offset="
             + maxAnalyzedOffset;
     }
 
-    /** One analyzer name, or {@code {field=analyzer, ...}} when fields differ. Uses {@link #analyzerName} when the list is empty. */
-    private String describeAnalyzers() {
-        if (fieldAnalyzers.isEmpty()) {
-            return String.valueOf(analyzerName);
-        }
+    /** One analyzer name, or {@code {field=analyzer, ...}} when fields differ. */
+    private String describeAnalyzers(AnalysisGroup group) {
+        List<NamedAnalyzer> fieldAnalyzers = group.fieldAnalyzers();
         if (fieldAnalyzers.stream().map(NamedAnalyzer::name).distinct().count() == 1) {
             return fieldAnalyzers.getFirst().name();
         }
         return IntStream.range(0, fieldNames.size())
             .mapToObj(i -> fieldNames.get(i) + "=" + fieldAnalyzers.get(i).name())
             .collect(Collectors.joining(", ", "{", "}"));
+    }
+
+    /**
+     * {@code , per_index_analyzer=[analyzer=[index, ...], ...]} for the groups after the first, in group order and naming
+     * at most {@link #MAX_DESCRIBED_INDICES} indices each; empty when every row uses the first group.
+     */
+    private String describePerIndexAnalyzers() {
+        if (groupByIndex.isEmpty()) {
+            return "";
+        }
+        List<SortedSet<String>> indicesByGroup = analysisGroups.stream().<SortedSet<String>>map(g -> new TreeSet<>()).toList();
+        groupByIndex.forEach((index, group) -> indicesByGroup.get(group).add(index));
+        return IntStream.range(1, analysisGroups.size())
+            .mapToObj(g -> describeAnalyzers(analysisGroups.get(g)) + "=" + describeIndices(indicesByGroup.get(g)))
+            .collect(Collectors.joining(", ", ", per_index_analyzer=[", "]"));
+    }
+
+    private static String describeIndices(SortedSet<String> indices) {
+        String sample = indices.stream().limit(MAX_DESCRIBED_INDICES).collect(Collectors.joining(", "));
+        int more = indices.size() - MAX_DESCRIBED_INDICES;
+        return "[" + sample + (more > 0 ? ", ...and " + more + " more" : "") + "]";
     }
 
     @Override
