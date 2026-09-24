@@ -102,9 +102,9 @@ public class HighlightOperatorTests extends OperatorTestCase {
     @Override
     protected Matcher<String> expectedToStringOfSimple() {
         return equalTo(
-            "HighlightOperator[lucene_queries=[content:fox], query=fox, pre_tag=<em>, post_tag=</em>, encoder=default, number_of_fragments=5, "
-                + "fragment_size=0, no_match_size=0, word_boundary=false, locale=, order_by_score=false, analyzer=StandardAnalyzer, "
-                + "max_analyzed_offset=-1, fields=[Attribute[channel=0]]]"
+            "HighlightOperator[lucene_queries=[content:fox], query=fox, pre_tag=<em>, post_tag=</em>, encoder=default, "
+                + "number_of_fragments=5, fragment_size=0, no_match_size=0, word_boundary=false, locale=, order_by_score=false, "
+                + "analyzer=StandardAnalyzer, max_analyzed_offset=-1, fields=[Attribute[channel=0]]]"
         );
     }
 

@@ -211,7 +211,10 @@ public class HighlightAnalyzersTests extends ESTestCase {
         return textField("title", null, DEFAULT_POSITION_INCREMENT_GAP, unknown);
     }
 
-    /** {@code books} uses {@code whitespace} with no gap, the two english indices share {@code stop} (prebuilt; {@code english} needs a plugin). */
+    /**
+     * {@code books} uses {@code whitespace} with no gap, the two english indices share {@code stop}
+     * (prebuilt; {@code english} needs a plugin).
+     */
     private static FieldAttribute conflictingField(String name) {
         return textFieldWithGroups(
             name,
