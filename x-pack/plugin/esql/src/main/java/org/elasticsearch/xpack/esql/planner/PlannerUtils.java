@@ -138,9 +138,9 @@ public class PlannerUtils {
         if (analyzer instanceof NamedAnalyzer named) {
             return named;
         }
-        // AnalysisPlugin#getAnalyzers returns a bare Lucene Analyzer. The registry only puts the text-field
-        // position increment gap on prebuilt NamedAnalyzers. Wrap the same way index mappings do so multi-value
-        // analysis keeps that gap.
+        // Node-level plugin analyzers (AnalysisPlugin#getAnalyzers) resolve to bare Lucene analyzers: the registry
+        // bakes the text-field position increment gap only into prebuilt analyzers. Wrap them the way index
+        // mappings do, so multi-value analysis keeps the gap the same analyzer would have on a mapped field.
         return new NamedAnalyzer(analyzerName, AnalyzerScope.GLOBAL, analyzer, TextFieldMapper.Defaults.POSITION_INCREMENT_GAP);
     }
 

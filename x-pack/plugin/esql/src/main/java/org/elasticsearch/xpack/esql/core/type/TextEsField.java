@@ -101,16 +101,20 @@ public class TextEsField extends EsField {
     }
 
     protected TextEsField(StreamInput in) throws IOException {
+        this(in, in.getTransportVersion().supports(FIELD_CAPS_INDEX_ANALYZER));
+    }
+
+    private TextEsField(StreamInput in, boolean hasAnalyzer) throws IOException {
         this(
             ((PlanStreamInput) in).readCachedString(),
             in.readImmutableMap(EsField::readFrom),
             in.readBoolean(),
             in.readBoolean(),
             readTimeSeriesFieldType(in),
-            in.getTransportVersion().supports(FIELD_CAPS_INDEX_ANALYZER) ? in.readOptionalString() : null,
-            in.getTransportVersion().supports(FIELD_CAPS_INDEX_ANALYZER) ? in.readVInt() : DEFAULT_POSITION_INCREMENT_GAP,
-            in.getTransportVersion().supports(FIELD_CAPS_INDEX_ANALYZER) ? in.readEnum(UnknownAnalyzer.class) : UnknownAnalyzer.NONE,
-            in.getTransportVersion().supports(FIELD_CAPS_INDEX_ANALYZER) ? in.readOptionalCollectionAsList(IndexAnalyzerGroup::new) : null
+            hasAnalyzer ? in.readOptionalString() : null,
+            hasAnalyzer ? in.readVInt() : DEFAULT_POSITION_INCREMENT_GAP,
+            hasAnalyzer ? in.readEnum(UnknownAnalyzer.class) : UnknownAnalyzer.NONE,
+            hasAnalyzer ? in.readOptionalCollectionAsList(IndexAnalyzerGroup::new) : null
         );
     }
 

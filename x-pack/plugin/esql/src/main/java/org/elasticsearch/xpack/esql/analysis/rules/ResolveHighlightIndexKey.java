@@ -77,10 +77,12 @@ public class ResolveHighlightIndexKey extends ParameterizedRule<LogicalPlan, Log
                 return highlight; // WITH analyzer applies to every row
             }
             Map<String, TextEsField> mappings = mergedMappings(highlight);
-            Holder<Attribute> key = new Holder<>();
-            LogicalPlan child = needsIndexKey(highlight, mappings) ? withIndexKey(highlight.child(), key) : null;
-            if (child != null) {
-                return highlight.withIndexKeyAndMappings(child, key.get(), mappings);
+            if (highlight.fields().stream().anyMatch(field -> HighlightAnalyzers.analyzerGroups(field, mappings) != null)) {
+                Holder<Attribute> key = new Holder<>();
+                LogicalPlan child = withIndexKey(highlight.child(), key);
+                if (child != null) {
+                    return highlight.withIndexKeyAndMappings(child, key.get(), mappings);
+                }
             }
             return mappings.equals(highlight.fieldMappings())
                 ? highlight
@@ -88,15 +90,11 @@ public class ResolveHighlightIndexKey extends ParameterizedRule<LogicalPlan, Log
         });
     }
 
-    private static boolean needsIndexKey(Highlight highlight, Map<String, TextEsField> mappings) {
-        return highlight.fields().stream().anyMatch(field -> HighlightAnalyzers.analyzerGroups(field, mappings) != null);
-    }
-
     /** The mapping of each text ON column that comes unchanged out of a FORK or UNION ALL, by name. */
     private static Map<String, TextEsField> mergedMappings(Highlight highlight) {
         Map<String, TextEsField> mappings = new HashMap<>();
         for (NamedExpression field : highlight.fields()) {
-            if (field instanceof Attribute column && column instanceof FieldAttribute == false && column.dataType() == TEXT) {
+            if (field instanceof Attribute column && (column instanceof FieldAttribute) == false && column.dataType() == TEXT) {
                 TextEsField mapping = mergedMapping(highlight.child(), column);
                 if (mapping != null) {
                     mappings.put(column.name(), mapping);
@@ -124,6 +122,7 @@ public class ResolveHighlightIndexKey extends ParameterizedRule<LogicalPlan, Log
      * when they disagree or one computes the column, or {@code null} when every branch fills it with nulls.
      */
     private static @Nullable TextEsField branchesMapping(MergePlan merge, String name) {
+        TextEsField conflict = mapping(name, null, TextEsField.DEFAULT_POSITION_INCREMENT_GAP, UnknownAnalyzer.BRANCH_CONFLICT, null);
         TextEsField agreed = null;
         for (LogicalPlan branch : merge.children()) {
             Attribute column = firstNamed(branch.output(), name, a -> true);
@@ -133,11 +132,18 @@ public class ResolveHighlightIndexKey extends ParameterizedRule<LogicalPlan, Log
             TextEsField found = column instanceof FieldAttribute
                 ? HighlightAnalyzers.mappingOf(column, Map.of())
                 : mergedMapping(branch, column);
-            TextEsField mapping = found == null
-                ? null
-                : mapping(name, found.analyzerName(), found.positionIncrementGap(), found.unknownAnalyzer(), found.analyzerGroups());
-            if (mapping == null || (agreed != null && agreed.equals(mapping) == false)) {
-                return mapping(name, null, TextEsField.DEFAULT_POSITION_INCREMENT_GAP, UnknownAnalyzer.BRANCH_CONFLICT, null);
+            if (found == null) {
+                return conflict;
+            }
+            TextEsField mapping = mapping(
+                name,
+                found.analyzerName(),
+                found.positionIncrementGap(),
+                found.unknownAnalyzer(),
+                found.analyzerGroups()
+            );
+            if (agreed != null && agreed.equals(mapping) == false) {
+                return conflict;
             }
             agreed = mapping;
         }

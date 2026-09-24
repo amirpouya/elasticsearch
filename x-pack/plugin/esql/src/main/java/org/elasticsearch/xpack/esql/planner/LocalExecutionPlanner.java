@@ -1625,7 +1625,7 @@ public class LocalExecutionPlanner {
     }
 
     // TODO: when highlighting can run directly against shard data, use real index offsets instead of re-analyzing
-    // each row in a MemoryIndex. Per-field mapped analyzers are on the plan via TextEsField.
+    // each row in a MemoryIndex.
     private PhysicalOperation planHighlight(HighlightExec highlight, LocalExecutionPlannerContext context) {
         PhysicalOperation source = plan(highlight.child(), context);
 

@@ -70,17 +70,10 @@ public record IndexFieldCapabilities(
         TimeSeriesParams.MetricType metricType = in.readOptionalEnum(TimeSeriesParams.MetricType.class);
         Map<String, String> meta = in.readImmutableMap(StreamInput::readString);
         boolean isInference = in.getTransportVersion().supports(FieldCapabilities.FIELD_CAPS_INFERENCE_FIELD) && in.readBoolean();
-        String indexAnalyzer = null;
-        int indexAnalyzerPositionIncrementGap = TextFieldMapper.Defaults.POSITION_INCREMENT_GAP;
-        boolean indexLocalAnalyzer = false;
-        if (in.getTransportVersion().supports(FieldCapabilities.FIELD_CAPS_INDEX_ANALYZER)) {
-            indexAnalyzer = in.readOptionalString();
-            if (indexAnalyzer != null) {
-                indexAnalyzerPositionIncrementGap = in.readVInt();
-            } else {
-                indexLocalAnalyzer = in.readBoolean();
-            }
-        }
+        boolean hasAnalyzer = in.getTransportVersion().supports(FieldCapabilities.FIELD_CAPS_INDEX_ANALYZER);
+        String indexAnalyzer = hasAnalyzer ? in.readOptionalString() : null;
+        int indexAnalyzerPositionIncrementGap = indexAnalyzer != null ? in.readVInt() : TextFieldMapper.Defaults.POSITION_INCREMENT_GAP;
+        boolean indexLocalAnalyzer = hasAnalyzer && indexAnalyzer == null && in.readBoolean();
         return new IndexFieldCapabilities(
             name,
             type,

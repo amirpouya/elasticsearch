@@ -195,8 +195,11 @@ public record HighlightConfig(
     /** One analyzer name, or {@code {field=analyzer, ...}} when fields differ. */
     private String describeAnalyzers(AnalysisGroup group) {
         List<NamedAnalyzer> fieldAnalyzers = group.fieldAnalyzers();
-        if (fieldAnalyzers.stream().map(NamedAnalyzer::name).distinct().count() == 1) {
-            return fieldAnalyzers.getFirst().name();
+        if (fieldAnalyzers.isEmpty() == false) {
+            String firstName = fieldAnalyzers.getFirst().name();
+            if (fieldAnalyzers.stream().allMatch(a -> a.name().equals(firstName))) {
+                return firstName;
+            }
         }
         return IntStream.range(0, fieldNames.size())
             .mapToObj(i -> fieldNames.get(i) + "=" + fieldAnalyzers.get(i).name())

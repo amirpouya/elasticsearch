@@ -39,7 +39,7 @@ public class HighlightExec extends UnaryExec {
     public static final NamedWriteableRegistry.Entry ENTRY = new NamedWriteableRegistry.Entry(
         PhysicalPlan.class,
         "HighlightExec",
-        HighlightExec::new
+        HighlightExec::readFrom
     );
 
     private final String prefix;
@@ -73,21 +73,19 @@ public class HighlightExec extends UnaryExec {
         this.fieldMappings = fieldMappings;
     }
 
-    private HighlightExec(StreamInput in) throws IOException {
-        this(
-            Source.readFrom((PlanStreamInput) in),
-            in.readNamedWriteable(PhysicalPlan.class),
-            in.readString(),
-            in.readOptionalNamedWriteable(Expression.class),
-            in.readNamedWriteableCollectionAsList(NamedExpression.class),
-            // MapExpression is registered under the Expression category, not its own, so read it as an Expression.
-            (MapExpression) in.readOptionalNamedWriteable(Expression.class),
-            in.readNamedWriteableCollectionAsList(Attribute.class),
-            in.getTransportVersion().supports(ESQL_HIGHLIGHT_IMPLICIT_QUERY_AND_FIELDS)
-                ? in.readOptionalNamedWriteable(Attribute.class)
-                : null,
-            in.getTransportVersion().supports(ESQL_HIGHLIGHT_IMPLICIT_QUERY_AND_FIELDS) ? in.readImmutableMap(EsField::readFrom) : Map.of()
-        );
+    private static HighlightExec readFrom(StreamInput in) throws IOException {
+        Source source = Source.readFrom((PlanStreamInput) in);
+        PhysicalPlan child = in.readNamedWriteable(PhysicalPlan.class);
+        String prefix = in.readString();
+        Expression query = in.readOptionalNamedWriteable(Expression.class);
+        List<NamedExpression> fields = in.readNamedWriteableCollectionAsList(NamedExpression.class);
+        // MapExpression is registered under the Expression category, not its own, so read it as an Expression.
+        MapExpression options = (MapExpression) in.readOptionalNamedWriteable(Expression.class);
+        List<Attribute> generatedFields = in.readNamedWriteableCollectionAsList(Attribute.class);
+        boolean supportsImplicit = in.getTransportVersion().supports(ESQL_HIGHLIGHT_IMPLICIT_QUERY_AND_FIELDS);
+        Attribute indexKey = supportsImplicit ? in.readOptionalNamedWriteable(Attribute.class) : null;
+        Map<String, TextEsField> fieldMappings = supportsImplicit ? in.readImmutableMap(EsField::readFrom) : Map.of();
+        return new HighlightExec(source, child, prefix, query, fields, options, generatedFields, indexKey, fieldMappings);
     }
 
     @Override

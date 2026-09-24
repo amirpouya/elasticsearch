@@ -92,6 +92,33 @@ public final class HighlightQueryBuilders {
         }
     }
 
+    /**
+     * Checks that the HIGHLIGHT query is a supported full-text form and translates with the same per-field
+     * analyzers execution will use. When {@code enforceOnFields} is true, every named field must be in
+     * {@code fieldAnalyzers}. An implicit query may name fields outside ON. Those fields become match-none,
+     * and errors are prefixed as derived from WHERE.
+     */
+    public static void verify(
+        Expression queryExpr,
+        Map<String, NamedAnalyzer> fieldAnalyzers,
+        boolean enforceOnFields,
+        boolean implicit,
+        @Nullable AnalysisRegistry analysisRegistry
+    ) {
+        String literal = queryTextIfLiteral(queryExpr);
+        if (literal == null) {
+            verifyQueryStructure(queryExpr, enforceOnFields ? List.copyOf(fieldAnalyzers.keySet()) : null);
+        }
+        try {
+            translate(queryExpr, fieldAnalyzers, implicit, analysisRegistry);
+        } catch (RuntimeException e) {
+            String prefix = implicit
+                ? "Invalid query derived from WHERE for HIGHLIGHT: "
+                : "Invalid query [" + (literal != null ? literal : queryExpr.sourceText()) + "] in HIGHLIGHT: ";
+            throw new IllegalArgumentException(prefix + e.getMessage(), e);
+        }
+    }
+
     private static void requireOnField(String field, @Nullable List<String> onFields) {
         if (onFields != null && onFields.contains(field) == false) {
             throw new IllegalArgumentException("HIGHLIGHT query field [" + field + "] is not in ON fields " + onFields);
@@ -140,33 +167,6 @@ public final class HighlightQueryBuilders {
     /** Rewrites the builder and converts it to a Lucene query. */
     public static Query toLuceneQuery(QueryBuilder builder, SearchExecutionContext context) {
         return context.toQuery(builder).query();
-    }
-
-    /**
-     * Checks that the HIGHLIGHT query is a supported full-text form and translates with the same per-field
-     * analyzers execution will use. When {@code enforceOnFields} is true, every named field must be in
-     * {@code fieldAnalyzers}. An implicit query may name fields outside ON. Those fields become match-none,
-     * and errors are prefixed as derived from WHERE.
-     */
-    public static void verify(
-        Expression queryExpr,
-        Map<String, NamedAnalyzer> fieldAnalyzers,
-        boolean enforceOnFields,
-        boolean implicit,
-        @Nullable AnalysisRegistry analysisRegistry
-    ) {
-        String literal = queryTextIfLiteral(queryExpr);
-        if (literal == null) {
-            verifyQueryStructure(queryExpr, enforceOnFields ? List.copyOf(fieldAnalyzers.keySet()) : null);
-        }
-        try {
-            translate(queryExpr, fieldAnalyzers, implicit, analysisRegistry);
-        } catch (RuntimeException e) {
-            String prefix = implicit
-                ? "Invalid query derived from WHERE for HIGHLIGHT: "
-                : "Invalid query [" + (literal != null ? literal : queryExpr.sourceText()) + "] in HIGHLIGHT: ";
-            throw new IllegalArgumentException(prefix + e.getMessage(), e);
-        }
     }
 
     /**

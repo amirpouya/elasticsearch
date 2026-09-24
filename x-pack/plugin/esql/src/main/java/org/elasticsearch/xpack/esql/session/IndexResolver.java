@@ -599,8 +599,7 @@ public class IndexResolver {
 
     /**
      * Keeps the index analyzer when every index agrees on the name and gap. A mix records which indices use which
-     * analyzer as {@link TextEsField#analyzerGroups()} when {@link FieldsInfo#needsAnalyzerGroups()}; only withheld
-     * {@code index.analysis} names are recorded on {@link TextEsField.UnknownAnalyzer}.
+     * analyzer as {@link TextEsField#analyzerGroups()} when {@link FieldsInfo#needsAnalyzerGroups()}.
      */
     private static TextEsField textField(
         String name,
@@ -618,7 +617,8 @@ public class IndexResolver {
         List<IndexAnalyzerGroup> groups = null;
         if (shared) {
             unknown = TextEsField.UnknownAnalyzer.NONE;
-        } else if (fcs.stream().anyMatch(fc -> fc.indexAnalyzer() != null)) {
+        } else if (analyzer != null || fcs.stream().anyMatch(fc -> fc.indexAnalyzer() != null)) {
+            // A non-null first analyzer that is not shared is already a conflict; otherwise look for any named peer.
             unknown = TextEsField.UnknownAnalyzer.CONFLICT;
             groups = fieldsInfo.needsAnalyzerGroups() ? analyzerGroups(fullName, fieldsInfo.caps()) : null;
         } else if (fcs.stream().anyMatch(IndexFieldCapabilities::indexLocalAnalyzer)) {
@@ -636,9 +636,11 @@ public class IndexResolver {
         for (FieldCapabilitiesIndexResponse ir : fieldCapsResponse.getIndexResponses()) {
             IndexFieldCapabilities fc = ir.get().get(fullName);
             if (fc != null) {
-                int gap = fc.indexAnalyzer() == null ? TextEsField.DEFAULT_POSITION_INCREMENT_GAP : fc.indexAnalyzerPositionIncrementGap();
-                indicesByAnalyzer.computeIfAbsent(new AnalyzerKey(fc.indexAnalyzer(), fc.indexLocalAnalyzer(), gap), k -> new TreeSet<>())
-                    .add(ir.getIndexName());
+                // IndexFieldCapabilities already normalizes the gap to the default when the name is null.
+                indicesByAnalyzer.computeIfAbsent(
+                    new AnalyzerKey(fc.indexAnalyzer(), fc.indexLocalAnalyzer(), fc.indexAnalyzerPositionIncrementGap()),
+                    k -> new TreeSet<>()
+                ).add(ir.getIndexName());
             }
         }
         return indicesByAnalyzer.entrySet()

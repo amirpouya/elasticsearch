@@ -159,7 +159,7 @@ public class HighlightOperator extends AbstractPageMappingOperator {
         // Term extraction for the highlighters only.
         IndexSearcher searcher = memoryIndex.createSearcher();
         List<HighlightConfig.AnalysisGroup> configGroups = config.requiredAnalysisGroups();
-        GroupHighlighters[] groups = configGroups.stream().map(g -> new GroupHighlighters(g, searcher)).toArray(GroupHighlighters[]::new);
+        GroupHighlighters[] groups = configGroups.stream().map(g -> groupHighlighters(g, searcher)).toArray(GroupHighlighters[]::new);
         this.defaultGroup = groups[0];
         this.groupByIndex = new HashMap<>();
         config.groupByIndex().forEach((index, group) -> groupByIndex.put(new BytesRef(index), groups[group]));
@@ -174,39 +174,35 @@ public class HighlightOperator extends AbstractPageMappingOperator {
     }
 
     /** The analyzers and highlighters for the rows of one {@link HighlightConfig.AnalysisGroup}. */
-    private final class GroupHighlighters {
-        private final List<NamedAnalyzer> fieldAnalyzers;
-        private final CustomUnifiedHighlighter[] highlighters;
-        private final TokenKeepSet keepSet;
+    private record GroupHighlighters(List<NamedAnalyzer> fieldAnalyzers, CustomUnifiedHighlighter[] highlighters, TokenKeepSet keepSet) {}
 
-        GroupHighlighters(HighlightConfig.AnalysisGroup group, IndexSearcher searcher) {
-            this.fieldAnalyzers = group.fieldAnalyzers();
-            Query query = group.query();
-            assert fieldNames.size() == fieldAnalyzers.size()
-                : "HIGHLIGHT ON field count [" + fieldNames.size() + "] does not match analyzer count [" + fieldAnalyzers.size() + "]";
-            this.highlighters = new CustomUnifiedHighlighter[fieldNames.size()];
-            for (int i = 0; i < fieldNames.size(); i++) {
-                UnifiedHighlighter.Builder builder = UnifiedHighlighter.builder(searcher, fieldAnalyzers.get(i));
-                builder.withFormatter(formatter);
-                builder.withBreakIterator(breakIteratorSupplier);
-                highlighters[i] = new CustomUnifiedHighlighter(
-                    builder,
-                    UnifiedHighlighter.OffsetSource.POSTINGS,
-                    true, // memory index contains one row
-                    null,
-                    "",
-                    fieldNames.get(i),
-                    query,
-                    config.noMatchSize(),
-                    highlighterNumberOfFragments,
-                    indexMaxAnalyzedOffset,
-                    queryMaxAnalyzedOffset,
-                    true,
-                    true
-                );
-            }
-            this.keepSet = buildKeepSet(query);
+    private GroupHighlighters groupHighlighters(HighlightConfig.AnalysisGroup group, IndexSearcher searcher) {
+        List<NamedAnalyzer> fieldAnalyzers = group.fieldAnalyzers();
+        Query query = group.query();
+        assert fieldNames.size() == fieldAnalyzers.size()
+            : "HIGHLIGHT ON field count [" + fieldNames.size() + "] does not match analyzer count [" + fieldAnalyzers.size() + "]";
+        CustomUnifiedHighlighter[] highlighters = new CustomUnifiedHighlighter[fieldNames.size()];
+        for (int i = 0; i < fieldNames.size(); i++) {
+            UnifiedHighlighter.Builder builder = UnifiedHighlighter.builder(searcher, fieldAnalyzers.get(i));
+            builder.withFormatter(formatter);
+            builder.withBreakIterator(breakIteratorSupplier);
+            highlighters[i] = new CustomUnifiedHighlighter(
+                builder,
+                UnifiedHighlighter.OffsetSource.POSTINGS,
+                true, // memory index contains one row
+                null,
+                "",
+                fieldNames.get(i),
+                query,
+                config.noMatchSize(),
+                highlighterNumberOfFragments,
+                indexMaxAnalyzedOffset,
+                queryMaxAnalyzedOffset,
+                true,
+                true
+            );
         }
+        return new GroupHighlighters(fieldAnalyzers, highlighters, buildKeepSet(query));
     }
 
     /**
@@ -401,13 +397,13 @@ public class HighlightOperator extends AbstractPageMappingOperator {
                 continue;
             }
             TokenStream tokenStream = new LimitTokenOffsetFilter(
-                rowTokenStream(field, group.fieldAnalyzers.get(i)),
+                rowTokenStream(field, group.fieldAnalyzers().get(i)),
                 queryMaxAnalyzedOffset.getNotNull(),
                 false
             );
             KeepQueryTermsFilter filtered = null;
-            if (group.keepSet != null) {
-                tokenStream = filtered = new KeepQueryTermsFilter(tokenStream, group.keepSet);
+            if (group.keepSet() != null) {
+                tokenStream = filtered = new KeepQueryTermsFilter(tokenStream, group.keepSet());
             }
             memoryIndex.addField(field.name, tokenStream); // addField resets and closes the stream
             if (filtered != null) {
@@ -415,7 +411,7 @@ public class HighlightOperator extends AbstractPageMappingOperator {
             }
         }
         // With filtering off keptToken stays false, so it says nothing about the row.
-        if (group.keepSet != null && keptToken == false && config.noMatchSize() == 0) {
+        if (group.keepSet() != null && keptToken == false && config.noMatchSize() == 0) {
             return null;
         }
         // MemoryIndex snapshots FieldInfos at reader construction, so create it after addField.
@@ -587,7 +583,7 @@ public class HighlightOperator extends AbstractPageMappingOperator {
     // CustomUnifiedHighlighter derives its FieldHighlighter from the query at build time and caches nothing from the
     // reader, so the constructor's per-field instances can be reused for every row and page.
     private Snippet[] highlight(LeafReader memoryIndexReader, GroupHighlighters group, int fieldIndex, String text) throws IOException {
-        return group.highlighters[fieldIndex].highlightField(memoryIndexReader, 0, () -> text);
+        return group.highlighters()[fieldIndex].highlightField(memoryIndexReader, 0, () -> text);
     }
 
     /**

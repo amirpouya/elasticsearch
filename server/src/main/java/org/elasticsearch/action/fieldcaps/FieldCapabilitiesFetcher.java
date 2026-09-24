@@ -18,7 +18,6 @@ import org.elasticsearch.index.analysis.AnalysisRegistry;
 import org.elasticsearch.index.analysis.NamedAnalyzer;
 import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.mapper.MappedFieldType;
-import org.elasticsearch.index.mapper.MappingLookup;
 import org.elasticsearch.index.mapper.ObjectMapper;
 import org.elasticsearch.index.mapper.RuntimeField;
 import org.elasticsearch.index.mapper.TextFieldMapper;
@@ -137,9 +136,8 @@ class FieldCapabilitiesFetcher {
         if (includeEmptyFields || enableFieldHasValue == false) {
             // The mapping hash omits index.analysis, which decides whether an analyzer name is withheld as index-local.
             Set<String> configuredAnalyzers = configuredAnalyzerNames(searchExecutionContext);
-            indexMappingHash = mapping == null
-                ? null
-                : mapping.getSha256() + indexMode + (configuredAnalyzers.isEmpty() ? "" : configuredAnalyzers.toString());
+            String analyzersSuffix = configuredAnalyzers.isEmpty() ? "" : configuredAnalyzers.toString();
+            indexMappingHash = mapping != null ? mapping.getSha256() + indexMode + analyzersSuffix : null;
         } else {
             // even if the mapping is the same if we return only fields with values we need
             // to make sure that we consider all the shard-mappings pair, that is why we
@@ -192,13 +190,12 @@ class FieldCapabilitiesFetcher {
 
         Predicate<MappedFieldType> filter = buildFilter(filters, types, context);
         boolean isTimeSeriesIndex = context.getIndexSettings().getTimestampBounds() != null;
-        MappingLookup mappingLookup = context.getMappingLookup();
-        Set<String> inferenceFieldNames = mappingLookup.inferenceFields().keySet();
+        Set<String> inferenceFieldNames = context.getMappingLookup().inferenceFields().keySet();
         Set<String> configuredAnalyzerNames = configuredAnalyzerNames(context);
         var fieldInfos = indexShard.getFieldInfos();
         includeEmptyFields = includeEmptyFields || enableFieldHasValue == false;
         Map<String, IndexFieldCapabilities> responseMap = new HashMap<>();
-        Map<String, ObjectMapper> objectMappers = mappingLookup.objectMappers();
+        Map<String, ObjectMapper> objectMappers = context.getMappingLookup().objectMappers();
         for (Map.Entry<String, MappedFieldType> entry : context.getAllFields()) {
             final String field = entry.getKey();
             MappedFieldType ft = entry.getValue();
@@ -208,7 +205,9 @@ class FieldCapabilitiesFetcher {
             if ((includeEmptyFields || ft.fieldHasValue(fieldInfos))
                 && (fieldPredicate.test(ft.name()) || context.isMetadataField(ft.name()))
                 && (filter == null || filter.test(ft))) {
-                NamedAnalyzer analyzer = textIndexAnalyzer(mappingLookup, ft);
+                NamedAnalyzer analyzer = TextFieldMapper.CONTENT_TYPE.equals(ft.familyTypeName())
+                    ? context.getMappingLookup().indexAnalyzer(ft.name(), unused -> null)
+                    : null;
                 // A name bound under index.analysis is index-local, even when it collides with a built-in such as
                 // english: the coordinator resolves analyzers by name and would build a different one.
                 boolean indexLocalAnalyzer = analyzer != null && configuredAnalyzerNames.contains(analyzer.name());
@@ -268,12 +267,6 @@ class FieldCapabilitiesFetcher {
             }
         }
         return responseMap;
-    }
-
-    /** Index analyzer of a text field, or {@code null} otherwise. */
-    @Nullable
-    private static NamedAnalyzer textIndexAnalyzer(MappingLookup mappingLookup, MappedFieldType ft) {
-        return TextFieldMapper.CONTENT_TYPE.equals(ft.familyTypeName()) ? mappingLookup.indexAnalyzer(ft.name(), unused -> null) : null;
     }
 
     /** Names under {@code index.analysis.analyzer}, sorted so the dedup hash is stable. */

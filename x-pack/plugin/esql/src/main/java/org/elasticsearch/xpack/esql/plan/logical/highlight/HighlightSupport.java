@@ -68,20 +68,17 @@ public final class HighlightSupport {
 
     /** The leaf's {@code analyzer} option, or {@code null} if absent, not foldable, or unsupported on that leaf type. */
     private static String analyzerNameOf(Expression fullTextLeaf) {
-        // KQL has no analyzer option. Other unsupported leaves return null and fail in verifyQueryStructure.
         Expression options = switch (fullTextLeaf) {
             case SingleFieldFullTextFunction single -> single.options();
             case QueryString queryString -> queryString.options();
+            case Kql kql -> kql.options();
             default -> null;
         };
         return foldedOption(options, ANALYZER_FIELD.getPreferredName());
     }
 
     private static String quoteAnalyzerNameOf(Expression fullTextLeaf) {
-        if (fullTextLeaf instanceof QueryString queryString) {
-            return foldedOption(queryString.options(), QUOTE_ANALYZER_FIELD.getPreferredName());
-        }
-        return null;
+        return fullTextLeaf instanceof QueryString qs ? foldedOption(qs.options(), QUOTE_ANALYZER_FIELD.getPreferredName()) : null;
     }
 
     /** The folded string value of option {@code name} in {@code options}, or {@code null} if absent or not a foldable constant. */

@@ -64,7 +64,7 @@ public class Highlight extends UnaryPlan
     public static final NamedWriteableRegistry.Entry ENTRY = new NamedWriteableRegistry.Entry(
         LogicalPlan.class,
         "Highlight",
-        Highlight::new
+        Highlight::readFrom
     );
 
     /** Minimum transport version that knows how to deserialize this plan node. */
@@ -152,22 +152,32 @@ public class Highlight extends UnaryPlan
         this.fieldMappings = fieldMappings;
     }
 
-    private Highlight(StreamInput in) throws IOException {
-        this(
-            Source.readFrom((PlanStreamInput) in),
-            in.readNamedWriteable(LogicalPlan.class),
-            in.readString(),
-            in.readOptionalNamedWriteable(Expression.class),
-            in.getTransportVersion().supports(ESQL_HIGHLIGHT_IMPLICIT_QUERY_AND_FIELDS) ? in.readBoolean() : false,
-            in.getTransportVersion().supports(ESQL_HIGHLIGHT_IMPLICIT_QUERY_AND_FIELDS) ? in.readBoolean() : false,
-            in.readNamedWriteableCollectionAsList(NamedExpression.class),
-            // MapExpression is registered under the Expression category, not its own, so read it as an Expression.
-            (MapExpression) in.readOptionalNamedWriteable(Expression.class),
-            in.readNamedWriteableCollectionAsList(Attribute.class),
-            in.getTransportVersion().supports(ESQL_HIGHLIGHT_IMPLICIT_QUERY_AND_FIELDS)
-                ? in.readOptionalNamedWriteable(Attribute.class)
-                : null,
-            in.getTransportVersion().supports(ESQL_HIGHLIGHT_IMPLICIT_QUERY_AND_FIELDS) ? in.readImmutableMap(EsField::readFrom) : Map.of()
+    private static Highlight readFrom(StreamInput in) throws IOException {
+        Source source = Source.readFrom((PlanStreamInput) in);
+        LogicalPlan child = in.readNamedWriteable(LogicalPlan.class);
+        String prefix = in.readString();
+        Expression query = in.readOptionalNamedWriteable(Expression.class);
+        boolean supportsImplicit = in.getTransportVersion().supports(ESQL_HIGHLIGHT_IMPLICIT_QUERY_AND_FIELDS);
+        boolean implicitQuery = supportsImplicit && in.readBoolean();
+        boolean derivedFields = supportsImplicit && in.readBoolean();
+        List<NamedExpression> fields = in.readNamedWriteableCollectionAsList(NamedExpression.class);
+        // MapExpression is registered under the Expression category, not its own, so read it as an Expression.
+        MapExpression options = (MapExpression) in.readOptionalNamedWriteable(Expression.class);
+        List<Attribute> generatedFields = in.readNamedWriteableCollectionAsList(Attribute.class);
+        Attribute indexKey = supportsImplicit ? in.readOptionalNamedWriteable(Attribute.class) : null;
+        Map<String, TextEsField> fieldMappings = supportsImplicit ? in.readImmutableMap(EsField::readFrom) : Map.of();
+        return new Highlight(
+            source,
+            child,
+            prefix,
+            query,
+            implicitQuery,
+            derivedFields,
+            fields,
+            options,
+            generatedFields,
+            indexKey,
+            fieldMappings
         );
     }
 
@@ -428,36 +438,30 @@ public class Highlight extends UnaryPlan
     @Override
     public void postAnalysisVerification(AnalysisRegistry analysisRegistry, Consumer<String> warnings, Failures failures) {
         postAnalysisVerification(failures);
-        if (query == null || query.resolved() == false || fields.isEmpty()) {
-            return;
-        }
+
         String commandAnalyzerName;
         try {
-            commandAnalyzerName = analyzerOptionName();
+            commandAnalyzerName = commandAnalyzerName();
         } catch (IllegalArgumentException e) {
             // The analyzer value isn't a string. Type errors have already been reported by verifyValue.
             commandAnalyzerName = null;
         }
-        if (verifyAnalyzerNames(commandAnalyzerName, failures, analysisRegistry)) {
-            return;
-        }
         verifyQuery(commandAnalyzerName, failures, analysisRegistry, warnings);
     }
 
-    private String analyzerOptionName() {
+    /** Value of the {@code analyzer} option, or {@code null} when unset. Throws when set but not a string. */
+    private String commandAnalyzerName() {
         Expression value = options == null ? null : foldableOption(ANALYZER);
         return value == null ? null : HighlightOptions.analyzerName(ANALYZER, value, FoldContext.small());
     }
 
-    /** WITH cannot clear this: the leaf option is query-side. */
-    private static String borrowedUnresolvedAnalyzerMessage(String name) {
-        return "HIGHLIGHT derived its query from a preceding WHERE, but that query refers to analyzer ["
-            + name
-            + "], which is not a registered analyzer. Write the query on HIGHLIGHT without that analyzer option, "
-            + "or drop the option from the WHERE; highlights may then differ from what matched.";
-    }
-
     private void verifyQuery(String commandAnalyzerName, Failures failures, AnalysisRegistry analysisRegistry, Consumer<String> warnings) {
+        if (query == null || query.resolved() == false || fields.isEmpty()) {
+            return;
+        }
+        if (verifyAnalyzerNames(commandAnalyzerName, failures, analysisRegistry)) {
+            return;
+        }
         try {
             // TO_TEXT declarations may not have been verified yet.
             HighlightAnalyzers.Resolved resolved = HighlightAnalyzers.resolve(
@@ -468,8 +472,7 @@ public class Highlight extends UnaryPlan
                 indexKey != null,
                 warnings
             );
-            // Enforce ON membership only when the query and field list are both explicit. An implicit query
-            // treats a field outside ON as match-none instead of failing.
+            // Enforce ON membership only when the user wrote both the query and the field list.
             for (Map<String, NamedAnalyzer> fieldAnalyzers : resolved.analysisGroups()) {
                 HighlightQueryBuilders.verify(
                     query,
@@ -497,8 +500,14 @@ public class Highlight extends UnaryPlan
             try {
                 PlannerUtils.resolveAnalyzer(name, analysisRegistry);
             } catch (InvalidArgumentException e) {
-                boolean borrowed = implicitQuery && name.equals(commandAnalyzerName) == false;
-                failures.add(fail(this, "{}", borrowed ? borrowedUnresolvedAnalyzerMessage(name) : e.getMessage()));
+                // A borrowed leaf option is query-side, so WITH cannot clear it.
+                String message = implicitQuery && name.equals(commandAnalyzerName) == false
+                    ? "HIGHLIGHT derived its query from a preceding WHERE, but that query refers to analyzer ["
+                        + name
+                        + "], which is not a registered analyzer. Write the query on HIGHLIGHT without that analyzer option, "
+                        + "or drop the option from the WHERE; highlights may then differ from what matched."
+                    : e.getMessage();
+                failures.add(fail(this, "{}", message));
                 return true;
             }
         }
