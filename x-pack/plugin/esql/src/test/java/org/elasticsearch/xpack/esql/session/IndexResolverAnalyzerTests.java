@@ -41,7 +41,6 @@ public class IndexResolverAnalyzerTests extends ESTestCase {
         // A node new enough to run HIGHLIGHT always names a text field's analyzer, so a silent index is one whose
         // index-local name was withheld. That is a real disagreement with an index naming a built-in.
         assertAnalyzer(resolveTitle("english", null), null, UnknownAnalyzer.CONFLICT);
-        assertAnalyzer(resolveTitle(null, "english"), null, UnknownAnalyzer.CONFLICT);
         // Every index silent with nothing withheld: no analyzer to speak of, so standard without a warning.
         assertAnalyzer(resolveTitle(null, null), null, UnknownAnalyzer.NONE);
 

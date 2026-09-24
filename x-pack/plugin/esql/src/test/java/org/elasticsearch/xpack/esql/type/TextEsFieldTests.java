@@ -21,50 +21,33 @@ import static org.elasticsearch.xpack.esql.type.EsFieldTestUtils.randomPropertie
 import static org.elasticsearch.xpack.esql.type.EsFieldTestUtils.randomTextEsField;
 
 public class TextEsFieldTests extends AbstractEsFieldTypeTests<TextEsField> {
-    /** Older peers omit the analyzer name, gap, and unknown-analyzer reason while retaining the rest of the field. */
-    public void testAnalyzerNameSerialization() throws IOException {
-        var field = new TextEsField(
-            "title",
-            Map.of(),
-            false,
-            false,
-            EsField.TimeSeriesFieldType.NONE,
-            "english",
-            0,
-            TextEsField.UnknownAnalyzer.NONE,
-            null
-        );
-        var oldVersion = TransportVersionUtils.getPreviousVersion(TextEsField.FIELD_CAPS_INDEX_ANALYZER);
-        assertEquals(new TextEsField("title", Map.of(), false, false, EsField.TimeSeriesFieldType.NONE), copyInstance(field, oldVersion));
-        assertEquals(field, copyInstance(field, TextEsField.FIELD_CAPS_INDEX_ANALYZER));
-    }
-
     /**
-     * Why the analyzer is unknown, and on a conflict which indices use which analyzer, ride the same transport version
-     * as the analyzer name; older peers do not see them.
+     * Older peers omit the analyzer name, gap, unknown-analyzer reason, and (on a conflict) which indices use which
+     * analyzer, while retaining the rest of the field. All of it rides the same transport version.
      */
-    public void testUnknownAnalyzerSerialization() throws IOException {
+    public void testAnalyzerMetadataSerialization() throws IOException {
         var oldVersion = TransportVersionUtils.getPreviousVersion(TextEsField.FIELD_CAPS_INDEX_ANALYZER);
-        for (var unknown : List.of(TextEsField.UnknownAnalyzer.CONFLICT, TextEsField.UnknownAnalyzer.INDEX_LOCAL)) {
-            var groups = unknown == TextEsField.UnknownAnalyzer.CONFLICT ? randomAnalyzerGroups() : null;
+        var bareField = new TextEsField("title", Map.of(), false, false, EsField.TimeSeriesFieldType.NONE);
+        record Case(String analyzerName, int gap, TextEsField.UnknownAnalyzer unknown, List<IndexAnalyzerGroup> groups) {}
+        for (Case c : List.of(
+            new Case("english", 0, TextEsField.UnknownAnalyzer.NONE, null),
+            new Case(null, TextEsField.DEFAULT_POSITION_INCREMENT_GAP, TextEsField.UnknownAnalyzer.CONFLICT, randomAnalyzerGroups()),
+            new Case(null, TextEsField.DEFAULT_POSITION_INCREMENT_GAP, TextEsField.UnknownAnalyzer.INDEX_LOCAL, null)
+        )) {
             var field = new TextEsField(
                 "title",
                 Map.of(),
                 false,
                 false,
                 EsField.TimeSeriesFieldType.NONE,
-                null,
-                TextEsField.DEFAULT_POSITION_INCREMENT_GAP,
-                unknown,
-                groups
+                c.analyzerName(),
+                c.gap(),
+                c.unknown(),
+                c.groups()
             );
-            assertEquals(unknown, field.unknownAnalyzer());
-            var old = copyInstance(field, oldVersion);
-            assertEquals(TextEsField.UnknownAnalyzer.NONE, old.unknownAnalyzer());
-            assertNull(old.analyzerGroups());
-            var current = copyInstance(field, TextEsField.FIELD_CAPS_INDEX_ANALYZER);
-            assertEquals(unknown, current.unknownAnalyzer());
-            assertEquals(groups, current.analyzerGroups());
+            assertEquals(c.unknown(), field.unknownAnalyzer());
+            assertEquals(bareField, copyInstance(field, oldVersion));
+            assertEquals(field, copyInstance(field, TextEsField.FIELD_CAPS_INDEX_ANALYZER));
         }
     }
 

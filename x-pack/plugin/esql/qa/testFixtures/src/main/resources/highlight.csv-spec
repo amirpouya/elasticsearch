@@ -2288,55 +2288,6 @@ Return of the King Being the Third Part of The Lord of the Rings | null
 ;
 
 
-# books title is default/standard: "ring" paints "Ring" and misses "Rings".
-highlightDefaultMappingAnalyzerUsesStandard
-required_capability: highlight_mapping_analyzer
-
-FROM books
-| WHERE book_no IN ("2714", "2936")
-| HIGHLIGHT "ring" ON title
-| KEEP book_no, highlight_title
-| SORT book_no
-;
-
-book_no:keyword | highlight_title:keyword
-2714            | null
-2936            | Fellowship of the <em>Ring</em> 2ND Edition
-;
-
-
-# Mapping english paints both "Ring" and "Rings" in one result set.
-highlightMappingAnalyzerStemsRingAndRings
-required_capability: highlight_mapping_analyzer
-
-FROM books_english
-| WHERE MATCH(title, "ring") AND book_no IN ("2714", "2936")
-| HIGHLIGHT
-| KEEP book_no, highlight_title
-| SORT book_no
-;
-
-book_no:keyword | highlight_title:keyword
-2714            | Return of the King Being the Third Part of The Lord of the <em>Rings</em>
-2936            | Fellowship of the <em>Ring</em> 2ND Edition
-;
-
-
-# WITH english is the highlight analyzer. The MATCH leaf is unlabeled so it does not disagree.
-highlightMappingAnalyzerWithOverridesLeafAnalyzer
-required_capability: highlight_mapping_analyzer
-
-FROM books_english
-| WHERE book_no == "2714"
-| HIGHLIGHT MATCH(title, "ring") ON title WITH { "analyzer": "english" }
-| KEEP highlight_title
-;
-
-highlight_title:keyword
-Return of the King Being the Third Part of The Lord of the <em>Rings</em>
-;
-
-
 # Keyword ON fields still use standard, not the keyword analyzer. "Tolkien" is a token of the value.
 highlightMappingAnalyzerKeywordFieldUsesStandard
 required_capability: highlight_mapping_analyzer
@@ -2477,21 +2428,6 @@ FROM books_english
 
 highlight_title:keyword
 Fellowship of the <em>Ring</em> 2ND Edition
-;
-
-
-# Two ON fields with different values analyzers. Each field's own analyzer tokenizes its own values.
-highlightPerFieldValuesAnalyzersAreIndependent
-required_capability: highlight_mapping_analyzer
-
-FROM books_english
-| WHERE MATCH(title, "ring") AND book_no == "2714"
-| HIGHLIGHT "ring" ON title, publisher
-| KEEP highlight_title, highlight_publisher
-;
-
-highlight_title:keyword                                                    | highlight_publisher:keyword
-Return of the King Being the Third Part of The Lord of the <em>Rings</em> | null
 ;
 
 

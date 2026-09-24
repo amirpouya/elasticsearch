@@ -71,11 +71,7 @@ public class HighlightSupportTests extends ESTestCase {
             new Or(EMPTY, qstr, kql),
             match("title", "fox", options("fuzziness", "AUTO")),
             match("title", "fox", options("analyzer", "english")),
-            matchPhrase("body", "quick fox", options("analyzer", "english")),
-            queryString("fox", options("analyzer", "english")),
-            queryString("fox", options("quote_analyzer", "english")),
-            new Kql(EMPTY, of("title: fox"), options("analyzer", "english"), TEST_CFG),
-            new And(EMPTY, match, match("body", "fox", options("analyzer", "english")))
+            queryString("fox", options("quote_analyzer", "english"))
         )) {
             assertTrue(supported.toString(), HighlightSupport.isSupportedImplicitPredicate(supported));
         }

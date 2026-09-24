@@ -70,15 +70,11 @@ public class HighlightAnalyzersTests extends ESTestCase {
         );
     }
 
-    // Mapping analyzer this node cannot build. Resolve returns standard instead of failing the query.
-    public void testUnknownMappingAnalyzerFallsBackToStandard() {
-        assertThat(names(textField("title", "my_index_analyzer")), contains("standard"));
-    }
-
-    // Same as above, but confirm a warning is emitted through the sink and names the field and analyzer.
-    public void testUnknownMappingAnalyzerEmitsFallbackWarning() {
+    // Mapping analyzer this node cannot build falls back to standard (instead of failing the query) and warns.
+    public void testUnknownMappingAnalyzerFallsBackToStandardAndWarns() {
         List<String> warnings = new ArrayList<>();
-        resolve(List.of(textField("title", "my_index_analyzer")), null, false, warnings);
+        Resolved resolved = resolve(List.of(textField("title", "my_index_analyzer")), null, false, warnings);
+        assertThat(names(resolved.analysisGroups().getFirst()), contains("standard"));
         assertThat(warnings, hasSize(1));
         assertThat(warnings.get(0), containsString("HIGHLIGHT on [title] falls back to [standard]"));
         assertThat(warnings.get(0), containsString("analyzer [my_index_analyzer]"));

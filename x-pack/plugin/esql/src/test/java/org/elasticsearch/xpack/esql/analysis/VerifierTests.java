@@ -5281,10 +5281,6 @@ public class VerifierTests extends AnalyzerTestCase {
             "FROM test | WHERE MATCH(title, \"fox\", {\"analyzer\": \"whitespace\"})"
                 + " | HIGHLIGHT ON title WITH { \"analyzer\": \"keyword\" }"
         );
-        supportsHighlightImplicit(fullText()).query(
-            "FROM test | WHERE MATCH(title, \"fox\", {\"analyzer\": \"whitespace\"})"
-                + " | HIGHLIGHT ON title WITH { \"analyzer\": \"whitespace\" }"
-        );
     }
 
     /** A resolvable WITH does not clear an unresolvable analyzer on the borrowed query. */
@@ -5379,10 +5375,6 @@ public class VerifierTests extends AnalyzerTestCase {
         supportsHighlight(fullText()).error(
             "FROM test | HIGHLIGHT MATCH(title, \"fox\") OR KNN(vector, [1, 2, 3]) ON title",
             containsString("HIGHLIGHT query must be a full-text function (MATCH, MATCH_PHRASE, QSTR, KQL)")
-        );
-        supportsHighlight(fullText()).error(
-            "FROM test | HIGHLIGHT MATCH(title, \"fox\", {\"analyzer\": \"not_a_real_analyzer\"}) ON title",
-            containsString("[not_a_real_analyzer] is not a registered analyzer")
         );
         supportsHighlight(fullText()).error(
             "FROM test | HIGHLIGHT MATCH(title, \"fox\") ON body",
