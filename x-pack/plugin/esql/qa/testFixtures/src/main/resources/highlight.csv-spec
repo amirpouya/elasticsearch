@@ -2021,7 +2021,7 @@ The Lord of the <em>Rings</em>
 ;
 
 
-# Mixed leaf/values analyzers are rejected at analysis. See VerifierTests#testHighlightMappingAnalyzerAgreesWithQueryWithoutWith.
+# Mixed leaf and values analyzers are allowed: leaf analyzers shape query terms while field analyzers tokenize values.
 
 # MATCH with no analyzer option uses the TO_TEXT column's declared analyzer. HIGHLIGHT options stay unset.
 implicitAnalyzerUnlabeledLeafUsesValuesAnalyzer
