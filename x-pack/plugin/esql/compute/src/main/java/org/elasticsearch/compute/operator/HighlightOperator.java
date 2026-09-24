@@ -96,11 +96,22 @@ public class HighlightOperator extends AbstractPageMappingOperator {
 
         @Override
         public Operator get(DriverContext driverContext) {
-            ExpressionEvaluator[] fieldEvaluators = fieldEvaluatorFactories.stream()
-                .map(factory -> factory.get(driverContext))
-                .toArray(ExpressionEvaluator[]::new);
-            ExpressionEvaluator indexEvaluator = indexEvaluatorFactory == null ? null : indexEvaluatorFactory.get(driverContext);
-            return new HighlightOperator(driverContext.blockFactory(), config, fieldEvaluators, indexEvaluator);
+            ExpressionEvaluator[] fieldEvaluators = new ExpressionEvaluator[fieldEvaluatorFactories.size()];
+            ExpressionEvaluator indexEvaluator = null;
+            boolean success = false;
+            try {
+                for (int i = 0; i < fieldEvaluators.length; i++) {
+                    fieldEvaluators[i] = fieldEvaluatorFactories.get(i).get(driverContext);
+                }
+                indexEvaluator = indexEvaluatorFactory == null ? null : indexEvaluatorFactory.get(driverContext);
+                Operator operator = new HighlightOperator(driverContext.blockFactory(), config, fieldEvaluators, indexEvaluator);
+                success = true;
+                return operator;
+            } finally {
+                if (success == false) {
+                    Releasables.closeWhileHandlingException(Releasables.wrap(fieldEvaluators), indexEvaluator);
+                }
+            }
         }
 
         @Override

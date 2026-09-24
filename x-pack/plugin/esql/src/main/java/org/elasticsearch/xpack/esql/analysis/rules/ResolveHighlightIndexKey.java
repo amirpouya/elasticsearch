@@ -58,10 +58,10 @@ import static org.elasticsearch.xpack.esql.core.type.DataType.TEXT;
  * When the queried indices disagree on an ON field's analyzer, HIGHLIGHT also gets each row's {@code _index}, so the row
  * is highlighted with the analyzer of the index it came from instead of {@code standard}. The key is a synthetic alias
  * of {@code _index} evaluated right above each relation and carried through every projection and every FORK or UNION ALL
- * branch up to HIGHLIGHT; being synthetic, {@code UnionTypesCleanup} keeps it out of the final output, and a user
- * {@code METADATA _index} that was renamed or dropped stays renamed or dropped. Rows that STATS and ROW produce have no
- * single source index, and DEDUP would group by the key, so those plans keep the {@code standard} fallback and its
- * warning.
+ * branch up to HIGHLIGHT. A projection restores HIGHLIGHT's original output so the injected columns cannot affect later
+ * commands, and a user {@code METADATA _index} that was renamed or dropped stays renamed or dropped. Rows that STATS and
+ * ROW produce have no single source index, and DEDUP would group by the key, so those plans keep the {@code standard}
+ * fallback and its warning.
  */
 public class ResolveHighlightIndexKey extends ParameterizedRule<LogicalPlan, LogicalPlan, AnalyzerContext> {
 
@@ -81,7 +81,12 @@ public class ResolveHighlightIndexKey extends ParameterizedRule<LogicalPlan, Log
                 Holder<Attribute> key = new Holder<>();
                 LogicalPlan child = withIndexKey(highlight.child(), key);
                 if (child != null) {
-                    return highlight.withIndexKeyAndMappings(child, key.get(), mappings);
+                    // Keep execution-only columns below this boundary: DEDUP groups by every input column.
+                    return new Project(
+                        highlight.source(),
+                        highlight.withIndexKeyAndMappings(child, key.get(), mappings),
+                        highlight.output()
+                    );
                 }
             }
             return mappings.equals(highlight.fieldMappings())

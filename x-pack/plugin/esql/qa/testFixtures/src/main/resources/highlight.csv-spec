@@ -2160,6 +2160,27 @@ Return of the King Being the Third Part of The Lord of the Rings | Return of the
 ;
 
 
+# HIGHLIGHT's internal index key must not keep otherwise identical rows apart in DEDUP.
+# A second HIGHLIGHT after DEDUP has no single source index and falls back to standard.
+highlightPerIndexAnalyzerBeforeDedup
+required_capability: highlight_mapping_analyzer
+required_capability: dedup_command
+
+FROM books,books_english
+| WHERE book_no == "2936"
+| KEEP title
+| HIGHLIGHT "ring" ON title
+| DEDUP
+| HIGHLIGHT prefix = "again_" "ring" ON title
+| KEEP title, highlight_title, again_title
+;
+
+warningRegex:HIGHLIGHT on \[title\] falls back to \[standard\]: the queried indices disagree on the analyzer for this field.*
+title:text | highlight_title:keyword | again_title:keyword
+Fellowship of the Ring 2ND Edition | Fellowship of the <em>Ring</em> 2ND Edition | Fellowship of the <em>Ring</em> 2ND Edition
+;
+
+
 # FORK's merged title carries no mapping of its own, so HIGHLIGHT uses the mapping analyzer both branches agree on:
 # english stems "Rings", so "ring" matches it.
 highlightMappingAnalyzerAfterFork

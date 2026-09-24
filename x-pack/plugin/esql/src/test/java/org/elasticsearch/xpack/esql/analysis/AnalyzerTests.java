@@ -104,6 +104,7 @@ import org.elasticsearch.xpack.esql.index.IndexResolution;
 import org.elasticsearch.xpack.esql.parser.ParsingException;
 import org.elasticsearch.xpack.esql.parser.QueryParams;
 import org.elasticsearch.xpack.esql.plan.logical.Aggregate;
+import org.elasticsearch.xpack.esql.plan.logical.Dedup;
 import org.elasticsearch.xpack.esql.plan.logical.Dissect;
 import org.elasticsearch.xpack.esql.plan.logical.Enrich;
 import org.elasticsearch.xpack.esql.plan.logical.EsRelation;
@@ -6853,6 +6854,24 @@ public class AnalyzerTests extends AnalyzerTestCase {
         assertThat(inlineStats.aggregate().child().outputSet(), hasItem(key));
         assertThat(fieldNames(plan.output()), not(hasItem(ResolveHighlightIndexKey.INDEX_KEY_NAME)));
         assertWarnings();
+    }
+
+    /** Internal analyzer-selection columns must not become DEDUP grouping keys or survive it for a later HIGHLIGHT. */
+    public void testHighlightIndexKeyDoesNotAffectFollowingDedup() {
+        assumeHighlightImplicitQueryAndFieldsEnabled();
+        assumeTrue("requires DEDUP", EsqlCapabilities.Cap.DEDUP_COMMAND.isEnabled());
+        for (String metadata : List.of("", " METADATA _index")) {
+            LogicalPlan plan = booksWithConflictingTitleAnalyzer().query(
+                "FROM books*" + metadata + " | HIGHLIGHT \"ring\" ON title | DEDUP | HIGHLIGHT prefix = \"again_\" \"ring\" ON title"
+            );
+            Dedup dedup = plan.collect(Dedup.class).getFirst();
+            assertThat(fieldNames(dedup.child().output()), not(hasItem(ResolveHighlightIndexKey.INDEX_KEY_NAME)));
+            assertEquals(metadata.isEmpty() == false, fieldNames(dedup.child().output()).contains(MetadataAttribute.INDEX));
+            List<Highlight> highlights = plan.collect(Highlight.class);
+            assertNull(highlights.getFirst().indexKey());
+            assertNotNull(highlights.getLast().indexKey());
+            assertWarnings(analyzerConflictFallbackWarning("title"));
+        }
     }
 
     /** A join's rows come from its left side, and a lone FROM subquery is its inner plan, so both carry the key. */
